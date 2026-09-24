@@ -1,45 +1,52 @@
-# [Project name]
+# DBBEMN
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Distributed Blood Bank & Emergency Matching Network: a university project for city-sharded blood inventory, emergency matching, and reservation workflows.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `pnpm run migrate` — apply numbered SQL migrations to Replit PostgreSQL.
+- `pnpm run seed:small` — insert the repeatable development seed.
+- `pnpm run verify:phase1` — list created schemas/tables and show seed counts.
+- `pnpm run test:phase1` — run real-DB compatibility and state-machine tests.
+- `pnpm run verify:invariants` — check reservation and transfusion invariants for all cities.
+- Prefix each command with `SCHEMA_PREFIX=t_` for isolated test schemas.
+- Required runtime env: Replit-managed `DATABASE_URL`; never request or set it manually.
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Node.js ES modules and plain JavaScript for DBBEMN product code.
+- PostgreSQL through `pg`; handwritten parameterized SQL only.
+- The user-provided `SPEC.md` locks the product stack and overrides the starter's TypeScript/Drizzle defaults.
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `db/migrations/` — authoritative numbered PostgreSQL migrations.
+- `backend/src/db/shard-router.js` — fixed city allow-list and schema identifier construction.
+- `scripts/` — migration, seed, invariant, and verification commands.
+- `docs/DESIGN.md` — schema tradeoffs, assumptions, and production mapping for simulated components.
+- `SPEC.md` — full product and phase requirements.
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Keep all business SQL parameterized and raw; do not add an ORM.
+- City schema names must be built only by `schemasFor` from `KHI`, `LHE`, or `ISB`.
+- A business write transaction must touch exactly one city's schemas.
+- The `{city}_read` schema and chaos controls are SIMULATED; never call them physical replication or real failover.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Phase 1 delivers the PostgreSQL data layer only. Later phases add API workflows, matching/search, and role-specific portals as specified.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+Implement one phase at a time and stop after that phase's required real verification output.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Apply migrations before seeding or running database tests.
+- Set `SCHEMA_PREFIX=t_` for isolated verification; the prefix applies to city schemas and migration history, not `common`/`catalog`.
+- Use `pnpm` in this workspace; the root preinstall rejects npm installs.
 
 ## Pointers
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- `SPEC.md` defines the locked stack and phase gates.
