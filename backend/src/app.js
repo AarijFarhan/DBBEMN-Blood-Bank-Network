@@ -12,6 +12,7 @@ import catalogRoutes from "./routes/catalog.js";
 import donationRoutes from "./routes/donations.js";
 import donorRoutes from "./routes/donors.js";
 import healthRoutes from "./routes/health.js";
+import reservationRoutes from "./routes/reservations.js";
 import unitRoutes from "./routes/units.js";
 
 const app = express();
@@ -61,6 +62,7 @@ app.use("/api/v1", catalogRoutes);
 app.use("/api/v1", donorRoutes);
 app.use("/api/v1", donationRoutes);
 app.use("/api/v1", unitRoutes);
+app.use("/api/v1", reservationRoutes);
 
 if (existsSync(frontendDir)) {
   app.use("/api", express.static(frontendDir, { index: "index.html", fallthrough: true }));

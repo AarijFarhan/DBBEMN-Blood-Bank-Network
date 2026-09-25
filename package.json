@@ -13,6 +13,7 @@
     "verify:phase1": "node ./scripts/verify-phase1.js",
     "test:phase1": "node --test ./backend/tests/phase1.test.js",
     "test:phase2": "SCHEMA_PREFIX=t_ node --test ./backend/tests/phase2.test.js",
+    "test:phase3": "SCHEMA_PREFIX=p3_ node --test ./backend/tests/phase3.test.js",
     "bootstrap:admin": "node ./scripts/bootstrap-admin.js"
   },
   "private": true,

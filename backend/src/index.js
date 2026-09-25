@@ -2,14 +2,17 @@ import { env } from "./config/env.js";
 import app from "./app.js";
 import { logger } from "./lib/logger.js";
 import { pool, waitForDatabase } from "./db/pool.js";
+import { startBackgroundJobs } from "./jobs/maintenance.js";
 
 await waitForDatabase();
+const stopBackgroundJobs = startBackgroundJobs(logger);
 const server = app.listen(env.port, "0.0.0.0", () => {
   logger.info({ port: env.port, instanceId: env.instanceId }, "DBBEMN API listening");
 });
 
 async function shutdown(signal) {
   logger.info({ signal }, "shutting down");
+  stopBackgroundJobs();
   server.close(async () => {
     await pool.end();
     process.exit(0);

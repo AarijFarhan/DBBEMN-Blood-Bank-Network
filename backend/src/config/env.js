@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { hkdfSync, randomUUID } from "node:crypto";
 
 function numberFromEnv(name, fallback, { min, max } = {}) {
   const raw = process.env[name];
@@ -22,10 +22,18 @@ if (!process.env.DATABASE_URL) {
 }
 
 const jwtSecret = requiredSecret("JWT_SECRET");
-const jwtRefreshSecret = requiredSecret("JWT_REFRESH_SECRET");
-if (jwtSecret === jwtRefreshSecret) {
-  throw new Error("JWT_SECRET and JWT_REFRESH_SECRET must be different values.");
-}
+const configuredRefreshSecret = requiredSecret("JWT_REFRESH_SECRET");
+// Why: HKDF context separation keeps access and refresh JWT keys distinct even
+// if operators accidentally configure the same source value for both secrets.
+const jwtRefreshSecret = Buffer.from(
+  hkdfSync(
+    "sha256",
+    configuredRefreshSecret,
+    "dbbemn-hkdf-salt-v1",
+    "dbbemn/jwt-refresh-signing/v1",
+    32,
+  ),
+).toString("base64url");
 
 export const env = Object.freeze({
   port: numberFromEnv("PORT", 8080, { min: 1, max: 65535 }),

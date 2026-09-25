@@ -53,6 +53,27 @@ export const createUserSchema = z.object({
   donorCityCode: cityCodeSchema.optional(),
 });
 
+export const reservationRequestSchema = z.object({
+  requestId: uuidSchema,
+  hospitalId: uuidSchema,
+  patientBloodGroup: bloodGroupSchema,
+  patientRh: rhSchema,
+  component: componentSchema,
+  unitsNeeded: z.number().int().min(1).max(10).default(1),
+  urgency: urgencySchema,
+  allowPartial: z.boolean().default(false),
+  searchScope: z.enum(["LOCAL_FIRST", "ALL_CITIES"]).default("LOCAL_FIRST"),
+});
+
+export const manualReservationSchema = z.object({
+  requestId: uuidSchema,
+  hospitalId: uuidSchema,
+  patientBloodGroup: bloodGroupSchema,
+  patientRh: rhSchema,
+  component: componentSchema,
+  urgency: urgencySchema,
+});
+
 export function queryObject(searchParams) {
   return Object.fromEntries(searchParams.entries());
 }
