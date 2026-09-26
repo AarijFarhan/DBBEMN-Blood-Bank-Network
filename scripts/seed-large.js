@@ -1,5 +1,10 @@
 import { CITY_CODES, schemasFor } from "../backend/src/db/shard-router.js";
-import { connectWithRetry, pool, withClient } from "./db.js";
+import {
+  cityScriptPool,
+  connectForCity,
+  endAllScriptPools,
+  withCatalogScriptClient,
+} from "./db.js";
 
 const DEFAULT_DONORS_PER_CITY = 5_000;
 const DEFAULT_UNITS_PER_CITY = 50_000;
@@ -68,7 +73,8 @@ const catalog = Object.fromEntries(
 );
 
 async function insertCatalogSeed() {
-  await withClient(async (client) => {
+  // catalog.* lives only on the catalog node; a city node must never gain it.
+  await withCatalogScriptClient(async (client) => {
     await client.query("BEGIN");
     try {
       for (const cityCode of CITY_CODES) {
@@ -283,7 +289,7 @@ async function backfillReadModel(client, cityCode, hot, read) {
 
 async function seedCity(cityCode) {
   const { hot, hist, read } = schemasFor(cityCode);
-  const client = await connectWithRetry();
+  const client = await connectForCity(cityCode)();
   try {
     await client.query("BEGIN");
     await insertDonors(client, cityCode, hist);
@@ -310,7 +316,7 @@ async function main() {
 
   for (const cityCode of CITY_CODES) {
     const { hot, hist, read } = schemasFor(cityCode);
-    const counts = await pool.query(
+    const counts = await cityScriptPool(cityCode).query(
       `SELECT
          (SELECT count(*)::int FROM ${hist}.donors) AS donors,
          (SELECT count(*)::int FROM ${hist}.donations) AS donations,
@@ -332,5 +338,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await pool.end();
+    await endAllScriptPools();
   });

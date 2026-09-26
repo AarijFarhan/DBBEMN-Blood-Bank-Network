@@ -33,6 +33,10 @@ function run(script, args = [], env = {}) {
 
 const isolated = { SCHEMA_PREFIX: prefix };
 const steps = [
+  // Step 0: drop the prefixed schemas AND their public.schema_migrations rows. The
+  // registry table lives in `public`, so without this a previous run's rows outlive
+  // the schemas they describe and migrate.js skips 001_city_schemas.sql.
+  ["reset-test-schemas.js", [], isolated],
   ["migrate.js", [], isolated],
   ["seed.js", [], isolated],
   ["run-test.js", ["phase1"], isolated],

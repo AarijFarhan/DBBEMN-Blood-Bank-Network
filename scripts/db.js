@@ -1,6 +1,10 @@
 import pg from "pg";
 
+import { CITY_CODES } from "../backend/src/db/shard-router.js";
+
 const { Pool } = pg;
+
+const CITY_CODE_SET = new Set(CITY_CODES);
 
 /**
  * Script-side database access.
@@ -163,3 +167,46 @@ export async function endAllScriptPools(entries = allScriptPools()) {
   cachedPools = null;
   singlePool = null;
 }
+
+/**
+ * Pool that owns the `catalog` and `common` schemas: the catalog node in
+ * distributed mode, the one shared pool in single mode.
+ *
+ * Why this exists: the `pool` export above always resolves to DATABASE_URL, which
+ * in distributed mode is not a node the application reads or writes. A script that
+ * seeds catalog rows through `pool` would write them into a database no request
+ * ever reaches, and report success. Callers must name the node they mean.
+ */
+export function catalogScriptPool() {
+  const nodes = allScriptPools();
+  const catalog = nodes.find((node) => node.label === "catalog");
+  return (catalog ?? nodes[0]).pool;
+}
+
+/**
+ * Pool that owns one city's `hot`/`history`/`read` schemas.
+ *
+ * In single mode every lookup returns the same pool, so this is a no-op there and
+ * scripts stay topology-agnostic. An unknown city throws instead of falling back
+ * to the catalog node, because writing one city's rows to the catalog node is the
+ * split-brain this routing exists to prevent.
+ */
+export function cityScriptPool(cityCode) {
+  if (!CITY_CODE_SET.has(cityCode)) {
+    throw new RangeError(`Unsupported city code: ${String(cityCode)}`);
+  }
+  const nodes = allScriptPools();
+  if (nodes.length === 1) return nodes[0].pool;
+  const node = nodes.find((entry) => entry.label === cityCode);
+  if (!node) {
+    throw new Error(
+      `Distributed mode has no node for ${cityCode}; set ${cityCode}_DATABASE_URL.`,
+    );
+  }
+  return node.pool;
+}
+
+export const withCatalogScriptClient = (callback) =>
+  withClientFor(catalogScriptPool())(callback);
+
+export const connectForCity = (cityCode) => connectWithRetryFor(cityScriptPool(cityCode));

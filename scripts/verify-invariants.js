@@ -1,5 +1,5 @@
 import { CITY_CODES, schemasFor } from "../backend/src/db/shard-router.js";
-import { pool } from "./db.js";
+import { cityScriptPool, endAllScriptPools } from "./db.js";
 
 async function count(client, sql) {
   const result = await client.query(sql);
@@ -8,6 +8,9 @@ async function count(client, sql) {
 
 async function verifyCity(cityCode) {
   const { hot, hist } = schemasFor(cityCode);
+  // Each city is checked on its own node. Reading all three from one pool would
+  // verify whichever database that pool points at and silently skip the other two.
+  const pool = cityScriptPool(cityCode);
   const checks = {
     I1: `SELECT count(*)::int AS violations
          FROM (
@@ -93,5 +96,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await pool.end();
+    await endAllScriptPools();
   });

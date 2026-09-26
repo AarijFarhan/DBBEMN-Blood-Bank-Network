@@ -3,11 +3,17 @@ import { after, test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { CITY_CODES, schemasFor } from "../src/db/shard-router.js";
 import { compatibleDonors } from "../src/utils/compatibility.js";
-import { pool } from "../../scripts/db.js";
+import { getCatalogPool, getPoolForCity } from "../src/db/registry.js";
 
 const GROUPS = ["O", "A", "B", "AB"];
 const RH_FACTORS = ["NEG", "POS"];
 const COMPONENTS = ["WHOLE_BLOOD", "PRBC", "PLATELETS", "PLASMA"];
+// T1 exercises common.compatible_donor and T2 writes shard rows, so both tests name
+// their node explicitly. Routing them through one shared pool was only ever correct
+// while a single database held every schema; in distributed mode it would run T2
+// against whichever node DATABASE_URL happened to point at.
+const cityCode = CITY_CODES[0];
+const cityPool = getPoolForCity(cityCode);
 const ABO_RH_ORDER = new Map(
   GROUPS.flatMap((group, groupIndex) =>
     RH_FACTORS.map((rh, rhIndex) => [`${group}:${rh}`, groupIndex * 2 + rhIndex]),
@@ -72,7 +78,11 @@ function routeToStatus(targetStatus) {
 }
 
 after(async () => {
-  await pool.end();
+  // Only the pools this file opened, and only once: in single mode the catalog and
+  // city lookups are the same object, so ending it twice would throw.
+  for (const target of new Set([getCatalogPool(), cityPool])) {
+    await target.end().catch(() => {});
+  }
 });
 
 test("T1: SQL and JavaScript compatibility agree for all 8 × 4 combinations", async () => {
@@ -81,7 +91,7 @@ test("T1: SQL and JavaScript compatibility agree for all 8 × 4 combinations", a
   for (const group of GROUPS) {
     for (const rh of RH_FACTORS) {
       for (const component of COMPONENTS) {
-        const result = await pool.query(
+        const result = await getCatalogPool().query(
           `SELECT g::text AS "group", r::text AS rh
            FROM common.compatible_donor($1::common.blood_group_t,
                                        $2::common.rh_t,
@@ -117,9 +127,8 @@ test("T1: SQL and JavaScript compatibility agree for all 8 × 4 combinations", a
 });
 
 test("T2: PostgreSQL rejects every illegal blood-unit status transition", async () => {
-  const cityCode = CITY_CODES[0];
   const { hot, hist } = schemasFor(cityCode);
-  const client = await pool.connect();
+  const client = await cityPool.connect();
   const donorId = randomUUID();
   const donationId = randomUUID();
   const bloodBankId = randomUUID();

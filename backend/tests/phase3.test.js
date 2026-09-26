@@ -4,9 +4,17 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import app from "../src/app.js";
-import { pool, waitForDatabase } from "../src/db/pool.js";
+import { getCatalogPool, getPoolForCity, waitForDatabases } from "../src/db/registry.js";
 import { schemasFor } from "../src/db/shard-router.js";
 import { sweepCity } from "../src/jobs/maintenance.js";
+
+// The contention fixtures and every shard assertion live in KHI, so shard SQL goes
+// to the KHI node and the hospital/bank/user rows go to the catalog node. Keeping
+// them apart is the point: a reservation in the KHI node references catalog
+// hospitals, and this file is what proves that cross-node reference resolves.
+const CITY = "KHI";
+const catalogPool = getCatalogPool();
+const cityPool = getPoolForCity(CITY);
 
 const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
 const testPassword = "Phase3-Test-Password-Only";
@@ -36,8 +44,8 @@ async function request(path, { method = "GET", token = hospitalToken, body } = {
 }
 
 async function createAvailableUnits(count, bloodGroup = "O", rh = "NEG") {
-  const { hot, hist } = schemasFor("KHI");
-  const result = await pool.query(
+  const { hot, hist } = schemasFor(CITY);
+  const result = await cityPool.query(
     `WITH donors AS (
        INSERT INTO ${hist}.donors
          (full_name, phone, date_of_birth, sex, weight_kg,
@@ -64,7 +72,7 @@ async function createAvailableUnits(count, bloodGroup = "O", rh = "NEG") {
   );
   unitIds.push(...result.rows.map((row) => row.unit_id));
   donationIds.push(...result.rows.map((row) => row.donation_id));
-  const donorResult = await pool.query(
+  const donorResult = await cityPool.query(
     `SELECT donor_id FROM ${hist}.donations WHERE donation_id = ANY($1::uuid[])`,
     [result.rows.map((row) => row.donation_id)],
   );
@@ -94,15 +102,15 @@ async function reserve(body, token = hospitalToken) {
 }
 
 before(async () => {
-  await waitForDatabase();
-  const hospital = await pool.query(
+  await waitForDatabases();
+  const hospital = await catalogPool.query(
     `INSERT INTO catalog.hospitals (name, city_code, latitude, longitude)
      VALUES ($1, 'KHI', 24.860700, 67.001100)
      RETURNING hospital_id`,
     [`Phase3 Hospital ${suffix}`],
   );
   hospitalId = hospital.rows[0].hospital_id;
-  const bank = await pool.query(
+  const bank = await catalogPool.query(
     `INSERT INTO catalog.blood_banks (name, city_code)
      VALUES ($1, 'KHI')
      RETURNING blood_bank_id`,
@@ -110,12 +118,12 @@ before(async () => {
   );
   bankId = bank.rows[0].blood_bank_id;
   const passwordHash = await bcrypt.hash(testPassword, 4);
-  await pool.query(
+  await catalogPool.query(
     `INSERT INTO catalog.users (username, email, password_hash, role, hospital_id)
      VALUES ($1, $2, $3, 'HOSPITAL_ADMIN', $4)`,
     [`phase3-hospital-${suffix}`, `phase3-hospital-${suffix}@example.test`, passwordHash, hospitalId],
   );
-  await pool.query(
+  await catalogPool.query(
     `INSERT INTO catalog.users (username, email, password_hash, role, blood_bank_id)
      VALUES ($1, $2, $3, 'BLOODBANK_ADMIN', $4)`,
     [`phase3-bank-${suffix}`, `phase3-bank-${suffix}@example.test`, passwordHash, bankId],
@@ -126,12 +134,12 @@ before(async () => {
   // seeded matches up front and let teardown put them back. Parking backdates
   // expiry_date instead of moving the status, because the shard trigger only
   // allows AVAILABLE -> RESERVED/EXPIRED/DISCARDED.
-  const { hot } = schemasFor("KHI");
+  const { hot } = schemasFor(CITY);
   // Why: a previously interrupted run can strand a seeded unit in
   // RESERVED/DISPATCHED with no live reservation, because the seed only resets
   // QUARANTINE units. Release those first so the shard starts from a state that
   // satisfies invariant I2.
-  await pool.query(
+  await cityPool.query(
     `UPDATE ${hot}.blood_units u
      SET status = CASE WHEN u.expiry_date > CURRENT_DATE
                        THEN 'AVAILABLE'::common.unit_status_t
@@ -143,7 +151,7 @@ before(async () => {
        )`,
   );
   parkedUnits = (
-    await pool.query(
+    await cityPool.query(
       `SELECT unit_id, to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date
        FROM ${hot}.blood_units
        WHERE status = 'AVAILABLE'
@@ -153,9 +161,14 @@ before(async () => {
     )
   ).rows;
   if (parkedUnits.length > 0) {
-    await pool.query(
+    // Why collected_on moves too: blood_units carries CHECK (expiry_date >
+    // collected_on), so backdating expiry alone trips blood_units_check. Ageing the
+    // collection date too keeps the constraint honest while still producing a unit
+    // that is genuinely past its expiry date for the sweep to find.
+    await cityPool.query(
       `UPDATE ${hot}.blood_units
-       SET expiry_date = CURRENT_DATE - 1
+       SET collected_on = CURRENT_DATE - 30,
+           expiry_date = CURRENT_DATE - 1
        WHERE unit_id = ANY($1::uuid[])`,
       [parkedUnits.map((row) => row.unit_id)],
     );
@@ -185,21 +198,21 @@ before(async () => {
 
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
-  const { hot, hist } = schemasFor("KHI");
-  await pool.query(
+  const { hot, hist } = schemasFor(CITY);
+  await cityPool.query(
     `DELETE FROM ${hot}.reservations WHERE request_id = ANY($1::uuid[])`,
     [requestIds],
   );
-  await pool.query(
+  await cityPool.query(
     `DELETE FROM ${hot}.processed_requests WHERE request_id = ANY($1::uuid[])`,
     [requestIds],
   );
-  await pool.query(`DELETE FROM ${hist}.transfusions WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
-  await pool.query(`DELETE FROM ${hist}.unit_status_log WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
-  await pool.query(`DELETE FROM ${hot}.outbox WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
-  await pool.query(`DELETE FROM ${hot}.blood_units WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
+  await cityPool.query(`DELETE FROM ${hist}.transfusions WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
+  await cityPool.query(`DELETE FROM ${hist}.unit_status_log WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
+  await cityPool.query(`DELETE FROM ${hot}.outbox WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
+  await cityPool.query(`DELETE FROM ${hot}.blood_units WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
   for (const row of parkedUnits) {
-    await pool.query(`UPDATE ${hot}.blood_units SET expiry_date = $2 WHERE unit_id = $1`, [
+    await cityPool.query(`UPDATE ${hot}.blood_units SET expiry_date = $2 WHERE unit_id = $1`, [
       row.unit_id,
       row.expiry_date,
     ]);
@@ -208,7 +221,7 @@ after(async () => {
   // touched - including the parked seeded unit - in RESERVED/DISPATCHED with no
   // live reservation. Releasing them keeps invariant I2 true and the next run
   // reproducible.
-  await pool.query(
+  await cityPool.query(
     `UPDATE ${hot}.blood_units u
      SET status = CASE WHEN u.expiry_date > CURRENT_DATE
                        THEN 'AVAILABLE'::common.unit_status_t
@@ -219,15 +232,17 @@ after(async () => {
          WHERE r.unit_id = u.unit_id AND r.status IN ('ACTIVE', 'DISPATCHED')
        )`,
   );
-  await pool.query(`DELETE FROM ${hist}.donations WHERE donation_id = ANY($1::uuid[])`, [donationIds]);
-  await pool.query(`DELETE FROM ${hist}.donors WHERE donor_id = ANY($1::uuid[])`, [donorIds]);
-  await pool.query(
+  await cityPool.query(`DELETE FROM ${hist}.donations WHERE donation_id = ANY($1::uuid[])`, [donationIds]);
+  await cityPool.query(`DELETE FROM ${hist}.donors WHERE donor_id = ANY($1::uuid[])`, [donorIds]);
+  await catalogPool.query(
     `DELETE FROM catalog.users WHERE username = ANY($1::text[])`,
     [[`phase3-hospital-${suffix}`, `phase3-bank-${suffix}`]],
   );
-  await pool.query("DELETE FROM catalog.hospitals WHERE hospital_id = $1", [hospitalId]);
-  await pool.query("DELETE FROM catalog.blood_banks WHERE blood_bank_id = $1", [bankId]);
-  await pool.end();
+  await catalogPool.query("DELETE FROM catalog.hospitals WHERE hospital_id = $1", [hospitalId]);
+  await catalogPool.query("DELETE FROM catalog.blood_banks WHERE blood_bank_id = $1", [bankId]);
+  for (const target of new Set([catalogPool, cityPool])) {
+    await target.end().catch(() => {});
+  }
 });
 
 test("Phase 3: contention, auto-match, idempotency, hold expiry, and 500 random sequences", {
@@ -268,14 +283,14 @@ test("Phase 3: contention, auto-match, idempotency, hold expiry, and 500 random 
   const expiring = await reserve(expiryBody);
   assert.equal(expiring.response.status, 200);
   const expiringReservation = expiring.data.reservations[0];
-  const { hot } = schemasFor("KHI");
-  await pool.query(
+  const { hot } = schemasFor(CITY);
+  await cityPool.query(
     `UPDATE ${hot}.reservations SET hold_expires_at = now() - interval '1 second'
      WHERE reservation_id = $1`,
     [expiringReservation.reservationId],
   );
-  await sweepCity("KHI");
-  const released = await pool.query(
+  await sweepCity(CITY);
+  const released = await cityPool.query(
     `SELECT u.status AS unit_status, r.status AS reservation_status
      FROM ${hot}.blood_units u
      JOIN ${hot}.reservations r ON r.unit_id = u.unit_id
@@ -345,7 +360,7 @@ test("Phase 3: contention, auto-match, idempotency, hold expiry, and 500 random 
         }
       } else {
         operations.add("expire");
-        await pool.query(
+        await cityPool.query(
           `UPDATE ${hot}.reservations
            SET hold_expires_at = now() - interval '1 second'
            WHERE reservation_id = $1`,
@@ -354,7 +369,7 @@ test("Phase 3: contention, auto-match, idempotency, hold expiry, and 500 random 
         hasExpiredHolds = true;
       }
     }
-    if (hasExpiredHolds) await sweepCity("KHI");
+    if (hasExpiredHolds) await sweepCity(CITY);
   }
   operations.add("reserve");
   assert.deepEqual(

@@ -1,5 +1,10 @@
 import { CITY_CODES, schemasFor } from "../backend/src/db/shard-router.js";
-import { connectWithRetry, pool, withClient } from "./db.js";
+import {
+  cityScriptPool,
+  connectForCity,
+  endAllScriptPools,
+  withCatalogScriptClient,
+} from "./db.js";
 
 const CITY_SEED = Object.freeze({
   KHI: {
@@ -191,7 +196,10 @@ async function seedCity(client, cityCode) {
 }
 
 async function main() {
-  await withClient(async (client) => {
+  // Catalog rows go to the catalog node, city rows to that city's node. Sending
+  // both through one pool is what used to work only because a single box held
+  // everything; in distributed mode it would seed a database the app never reads.
+  await withCatalogScriptClient(async (client) => {
     await client.query("BEGIN");
     try {
       await insertCatalogSeed(client);
@@ -205,7 +213,7 @@ async function main() {
   // Why: city-specific seed transactions mirror the app's single-city write
   // rule and keep the demo seed safe to rerun using deterministic identifiers.
   for (const cityCode of CITY_CODES) {
-    const client = await connectWithRetry();
+    const client = await connectForCity(cityCode)();
     try {
       await client.query("BEGIN");
       await seedCity(client, cityCode);
@@ -220,7 +228,7 @@ async function main() {
 
   for (const cityCode of CITY_CODES) {
     const { hot, hist } = schemasFor(cityCode);
-    const counts = await pool.query(
+    const counts = await cityScriptPool(cityCode).query(
       `SELECT
          (SELECT count(*)::int FROM ${hist}.donors) AS donors,
          (SELECT count(*)::int FROM ${hist}.donations) AS donations,
@@ -237,5 +245,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await pool.end();
+    await endAllScriptPools();
   });

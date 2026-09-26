@@ -4,7 +4,16 @@ import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import app from "../src/app.js";
 import { schemasFor } from "../src/db/shard-router.js";
-import { pool, waitForDatabase } from "../src/db/pool.js";
+import { getCatalogPool, getPoolForCity, waitForDatabases } from "../src/db/registry.js";
+
+// Every shard assertion in this file is about KHI, so the shard fixtures and
+// teardown target that one city node. Catalog rows are a different node entirely:
+// catalog.users, catalog.hospitals and catalog.blood_banks only exist on the
+// catalog node, so those statements must not be sent to a city pool.
+const CITY = "KHI";
+const catalogPool = getCatalogPool();
+const cityPool = getPoolForCity(CITY);
+const { hot, hist } = schemasFor(CITY);
 
 const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
 const adminUsername = `phase2-admin-${suffix}`;
@@ -39,9 +48,12 @@ async function request(path, { method = "GET", token, body } = {}) {
 }
 
 before(async () => {
-  await waitForDatabase();
+  // Waits on all four nodes, not just one: the login below reads catalog.users from
+  // the catalog node while every later assertion crosses into the KHI shard, so a
+  // green run has to prove both are reachable.
+  await waitForDatabases();
   const passwordHash = await bcrypt.hash(testPassword, 4);
-  await pool.query(
+  await catalogPool.query(
     `INSERT INTO catalog.users (username, email, password_hash, role)
      VALUES ($1, $2, $3, 'SYSTEM_ADMIN')`,
     [adminUsername, adminEmail, passwordHash],
@@ -56,35 +68,39 @@ before(async () => {
 
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
-  const { hot, hist } = schemasFor("KHI");
-  await pool.query(
+  await cityPool.query(
     `DELETE FROM ${hot}.blood_units WHERE unit_id = ANY($1::uuid[])`,
     [unitIds],
   );
-  await pool.query(
+  await cityPool.query(
     `DELETE FROM ${hot}.outbox WHERE unit_id = ANY($1::uuid[])`,
     [unitIds],
   );
-  await pool.query(
+  await cityPool.query(
     `DELETE FROM ${hist}.unit_status_log WHERE unit_id = ANY($1::uuid[])`,
     [unitIds],
   );
-  await pool.query(
+  await cityPool.query(
     `DELETE FROM ${hist}.donations WHERE donation_id = ANY($1::uuid[])`,
     [donationIds],
   );
-  await pool.query(
+  await cityPool.query(
     `DELETE FROM ${hist}.donors WHERE donor_id = ANY($1::uuid[])`,
     [donorIds],
   );
-  await pool.query(
+  await catalogPool.query(
     `DELETE FROM catalog.users
      WHERE username = ANY($1::text[])`,
     [[adminUsername, donorUsername, ineligibleUsername, `phase2-bank-${suffix}`, `phase2-hospital-${suffix}`]],
   );
-  await pool.query("DELETE FROM catalog.hospitals WHERE hospital_id = ANY($1::uuid[])", [hospitalIds]);
-  await pool.query("DELETE FROM catalog.blood_banks WHERE blood_bank_id = ANY($1::uuid[])", [bankIds]);
-  await pool.end();
+  await catalogPool.query("DELETE FROM catalog.hospitals WHERE hospital_id = ANY($1::uuid[])", [hospitalIds]);
+  await catalogPool.query("DELETE FROM catalog.blood_banks WHERE blood_bank_id = ANY($1::uuid[])", [bankIds]);
+  // Why here and not pool.end(): the app under test shares these pools, and ending
+  // them is only safe once the server has stopped. Distinct objects only - in single
+  // mode the catalog and KHI lookups are the same pool.
+  for (const target of new Set([catalogPool, cityPool])) {
+    await target.end().catch(() => {});
+  }
 });
 
 test("Phase 2: auth, catalog, tenant scope, donors, donations, units, and health", async () => {

@@ -1,13 +1,16 @@
 import { CITY_CODES, schemasFor } from "../backend/src/db/shard-router.js";
-import { pool } from "./db.js";
+import { catalogScriptPool, cityScriptPool, endAllScriptPools } from "./db.js";
 
-async function main() {
-  const schemas = ["common", "catalog"];
-  for (const cityCode of CITY_CODES) {
-    const citySchemas = schemasFor(cityCode);
-    schemas.push(citySchemas.hot, citySchemas.hist, citySchemas.read);
-  }
-
+/**
+ * Report the tables each node owns and the seed counts on each city.
+ *
+ * Why per node instead of one listing: in distributed mode the catalog tables and
+ * the city tables live in different databases, so a single pg_class query would
+ * only ever see whichever node its pool pointed at. The node label is printed with
+ * every group, which is also what makes a wrong DATABASE_URL visible here instead
+ * of showing up later as missing data.
+ */
+async function listObjects(label, pool, schemas) {
   const objects = await pool.query(
     `SELECT n.nspname AS schema_name, c.relname AS object_name, c.relkind
      FROM pg_catalog.pg_class c
@@ -17,14 +20,22 @@ async function main() {
      ORDER BY n.nspname, c.relname`,
     [schemas],
   );
-  process.stdout.write(`[phase1] schemas=${schemas.join(",")}\n`);
-  process.stdout.write(`[phase1] tables=${objects.rowCount}\n`);
+  process.stdout.write(`[phase1] node=${label} schemas=${schemas.join(",")}\n`);
+  process.stdout.write(`[phase1] node=${label} tables=${objects.rowCount}\n`);
   for (const row of objects.rows) {
     process.stdout.write(`  ${row.schema_name}.${row.object_name}\n`);
   }
+}
+
+async function main() {
+  const catalogPool = catalogScriptPool();
+  await listObjects("catalog", catalogPool, ["common", "catalog"]);
 
   for (const cityCode of CITY_CODES) {
-    const { hot, hist } = schemasFor(cityCode);
+    const { hot, hist, read } = schemasFor(cityCode);
+    const pool = cityScriptPool(cityCode);
+    await listObjects(cityCode, pool, ["common", hot, hist, read]);
+
     const counts = await pool.query(
       `SELECT
          (SELECT count(*)::int FROM ${hist}.donors) AS donors,
@@ -42,5 +53,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await pool.end();
+    await endAllScriptPools();
   });
