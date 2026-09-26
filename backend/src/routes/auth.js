@@ -3,11 +3,13 @@ import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
-import { pool, withClient, withSerializableRetry } from "../db/pool.js";
+import { connectWithRetryFor, withSerializableRetryFor } from "../db/pool.js";
+import { getCatalogPool, getPoolForCity } from "../db/registry.js";
 import { authenticate } from "../middleware/auth.js";
 import { AppError, asyncRoute } from "../middleware/errors.js";
 import { validate } from "../middleware/validate.js";
 import { schemasFor } from "../db/shard-router.js";
+import { assertCityWritable } from "../services/chaos.js";
 import { createTokenPair, hashRefreshToken } from "../utils/tokens.js";
 import { loginSchema, refreshSchema, registerDonorSchema } from "../utils/validators.js";
 
@@ -28,7 +30,7 @@ function publicUser(user) {
 
 async function saveRefreshToken(user) {
   const pair = createTokenPair(user);
-  await pool.query(
+  await getCatalogPool().query(
     `INSERT INTO catalog.refresh_tokens (token_id, user_id, token_hash, expires_at)
      VALUES ($1, $2, $3, now() + interval '7 days')`,
     [pair.tokenId, user.user_id, hashRefreshToken(pair.refreshToken)],
@@ -45,8 +47,9 @@ router.post(
     const { hist } = schemasFor(body.cityCode);
     const passwordHash = await bcrypt.hash(body.password, 12);
 
-    await withSerializableRetry((client) =>
-      client.query(
+    await withSerializableRetryFor(getPoolForCity(body.cityCode))(async (client) => {
+      await assertCityWritable(client, body.cityCode);
+      return client.query(
         `INSERT INTO ${hist}.donors
            (donor_id, full_name, phone, date_of_birth, sex, weight_kg,
             blood_group, rh_factor, city_code, is_available)
@@ -62,12 +65,12 @@ router.post(
           body.rhFactor,
           body.cityCode,
         ],
-      ),
-    );
+      );
+    });
 
     let user;
     try {
-      const result = await pool.query(
+      const result = await getCatalogPool().query(
         `INSERT INTO catalog.users
            (username, email, password_hash, role, donor_id, donor_city_code)
          VALUES ($1, $2, $3, 'DONOR', $4, $5)
@@ -77,7 +80,7 @@ router.post(
       );
       user = result.rows[0];
     } catch (error) {
-      await withSerializableRetry((client) =>
+      await withSerializableRetryFor(getPoolForCity(body.cityCode))((client) =>
         client.query(`DELETE FROM ${hist}.donors WHERE donor_id = $1`, [donorId]),
       ).catch(() => {});
       if (error.code === "23505") {
@@ -102,7 +105,7 @@ router.post(
   validate(loginSchema),
   asyncRoute(async (req, res) => {
     const login = req.body.login.toLowerCase();
-    const result = await pool.query(
+    const result = await getCatalogPool().query(
       `SELECT user_id, username, email, password_hash, role, hospital_id,
               blood_bank_id, donor_id, donor_city_code, is_active
        FROM catalog.users
@@ -144,7 +147,9 @@ router.post(
       throw new AppError(401, "INVALID_REFRESH_TOKEN", "The refresh token is invalid.");
     }
 
-    const client = await pool.connect();
+    // Must be the per-pool factory: refresh_tokens live on the catalog node,
+    // which in distributed mode is a different server than the legacy single pool.
+    const client = await connectWithRetryFor(getCatalogPool())();
     try {
       await client.query("BEGIN");
       const stored = await client.query(
@@ -220,7 +225,7 @@ router.post(
     if (claims.sub !== req.user.user_id || !claims.jti) {
       throw new AppError(403, "TOKEN_OWNER_MISMATCH", "This refresh token belongs to another account.");
     }
-    await pool.query(
+    await getCatalogPool().query(
       `UPDATE catalog.refresh_tokens
        SET revoked_at = COALESCE(revoked_at, now())
        WHERE token_id = $1 AND user_id = $2 AND token_hash = $3`,

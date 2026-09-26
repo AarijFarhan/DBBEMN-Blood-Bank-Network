@@ -14,6 +14,7 @@ const unitIds = [];
 const donorIds = [];
 const donationIds = [];
 const requestIds = [];
+let parkedUnits = [];
 let hospitalId;
 let bankId;
 let hospitalToken;
@@ -120,6 +121,46 @@ before(async () => {
     [`phase3-bank-${suffix}`, `phase3-bank-${suffix}@example.test`, passwordHash, bankId],
   );
 
+  // Why: the small seed leaves one O NEG PRBC unit AVAILABLE in KHI. Every
+  // contention assertion below counts exact candidate totals, so park the
+  // seeded matches up front and let teardown put them back. Parking backdates
+  // expiry_date instead of moving the status, because the shard trigger only
+  // allows AVAILABLE -> RESERVED/EXPIRED/DISCARDED.
+  const { hot } = schemasFor("KHI");
+  // Why: a previously interrupted run can strand a seeded unit in
+  // RESERVED/DISPATCHED with no live reservation, because the seed only resets
+  // QUARANTINE units. Release those first so the shard starts from a state that
+  // satisfies invariant I2.
+  await pool.query(
+    `UPDATE ${hot}.blood_units u
+     SET status = CASE WHEN u.expiry_date > CURRENT_DATE
+                       THEN 'AVAILABLE'::common.unit_status_t
+                       ELSE 'EXPIRED'::common.unit_status_t END
+     WHERE u.status IN ('RESERVED', 'DISPATCHED')
+       AND NOT EXISTS (
+         SELECT 1 FROM ${hot}.reservations r
+         WHERE r.unit_id = u.unit_id AND r.status IN ('ACTIVE', 'DISPATCHED')
+       )`,
+  );
+  parkedUnits = (
+    await pool.query(
+      `SELECT unit_id, to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date
+       FROM ${hot}.blood_units
+       WHERE status = 'AVAILABLE'
+         AND blood_group = 'O' AND rh_factor = 'NEG'
+         AND component_type = 'PRBC'
+         AND expiry_date > CURRENT_DATE`,
+    )
+  ).rows;
+  if (parkedUnits.length > 0) {
+    await pool.query(
+      `UPDATE ${hot}.blood_units
+       SET expiry_date = CURRENT_DATE - 1
+       WHERE unit_id = ANY($1::uuid[])`,
+      [parkedUnits.map((row) => row.unit_id)],
+    );
+  }
+
   server = app.listen(0, "127.0.0.1");
   await new Promise((resolve, reject) => {
     server.once("listening", resolve);
@@ -157,6 +198,27 @@ after(async () => {
   await pool.query(`DELETE FROM ${hist}.unit_status_log WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
   await pool.query(`DELETE FROM ${hot}.outbox WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
   await pool.query(`DELETE FROM ${hot}.blood_units WHERE unit_id = ANY($1::uuid[])`, [unitIds]);
+  for (const row of parkedUnits) {
+    await pool.query(`UPDATE ${hot}.blood_units SET expiry_date = $2 WHERE unit_id = $1`, [
+      row.unit_id,
+      row.expiry_date,
+    ]);
+  }
+  // Why: teardown drops this test's reservations, which strands every unit they
+  // touched - including the parked seeded unit - in RESERVED/DISPATCHED with no
+  // live reservation. Releasing them keeps invariant I2 true and the next run
+  // reproducible.
+  await pool.query(
+    `UPDATE ${hot}.blood_units u
+     SET status = CASE WHEN u.expiry_date > CURRENT_DATE
+                       THEN 'AVAILABLE'::common.unit_status_t
+                       ELSE 'EXPIRED'::common.unit_status_t END
+     WHERE u.status IN ('RESERVED', 'DISPATCHED')
+       AND NOT EXISTS (
+         SELECT 1 FROM ${hot}.reservations r
+         WHERE r.unit_id = u.unit_id AND r.status IN ('ACTIVE', 'DISPATCHED')
+       )`,
+  );
   await pool.query(`DELETE FROM ${hist}.donations WHERE donation_id = ANY($1::uuid[])`, [donationIds]);
   await pool.query(`DELETE FROM ${hist}.donors WHERE donor_id = ANY($1::uuid[])`, [donorIds]);
   await pool.query(

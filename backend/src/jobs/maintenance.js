@@ -1,6 +1,8 @@
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
-import { connectWithRetry, pool, withSerializableRetry } from "../db/pool.js";
+import { connectWithRetryFor, withSerializableRetryFor } from "../db/pool.js";
+import { getPoolForCity } from "../db/registry.js";
 import { env } from "../config/env.js";
+import { assertCityWritable, getChaosFlag } from "../services/chaos.js";
 
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const REPLICA_INTERVAL_MS = 1_000;
@@ -9,93 +11,107 @@ const REPLICA_BATCH_SIZE = 500;
 
 export async function sweepCity(cityCode) {
   const { hot, read } = schemasFor(cityCode);
-  return withSerializableRetry(async (client) => {
-    const flag = await client.query(
-      "SELECT primary_down FROM catalog.chaos_flags WHERE city_code = $1",
-      [cityCode],
-    );
-    if (flag.rows[0]?.primary_down) return { skipped: "SIMULATED_PRIMARY_DOWN" };
+  try {
+    const flag = await getChaosFlag(cityCode);
+    if (flag.primaryDown) return { skipped: "SIMULATED_PRIMARY_DOWN" };
+    const withSerializableRetry = withSerializableRetryFor(getPoolForCity(cityCode));
+    return await withSerializableRetry(async (client) => {
+      await assertCityWritable(client, cityCode);
+      const expiredHolds = await client.query(
+        `SELECT r.reservation_id, r.unit_id, u.expiry_date
+         FROM ${hot}.reservations r
+         JOIN ${hot}.blood_units u ON u.unit_id = r.unit_id
+         WHERE r.status = 'ACTIVE' AND r.hold_expires_at <= now()
+         ORDER BY r.hold_expires_at, r.reservation_id
+         LIMIT $1
+         FOR UPDATE OF r, u SKIP LOCKED`,
+        [JOB_BATCH_SIZE],
+      );
+      let released = 0;
+      for (const row of expiredHolds.rows) {
+        const reservation = await client.query(
+          `UPDATE ${hot}.reservations
+           SET status = 'EXPIRED'
+           WHERE reservation_id = $1 AND status = 'ACTIVE'
+           RETURNING reservation_id`,
+          [row.reservation_id],
+        );
+        if (reservation.rowCount === 0) continue;
+        const unit = await client.query(
+          `UPDATE ${hot}.blood_units
+           SET status = CASE
+             WHEN expiry_date > CURRENT_DATE THEN 'AVAILABLE'::common.unit_status_t
+             ELSE 'EXPIRED'::common.unit_status_t
+           END
+           WHERE unit_id = $1 AND status = 'RESERVED'
+           RETURNING unit_id`,
+          [row.unit_id],
+        );
+        if (unit.rowCount > 0) released += 1;
+      }
 
-    const expiredHolds = await client.query(
-      `SELECT r.reservation_id, r.unit_id, u.expiry_date
-       FROM ${hot}.reservations r
-       JOIN ${hot}.blood_units u ON u.unit_id = r.unit_id
-       WHERE r.status = 'ACTIVE' AND r.hold_expires_at <= now()
-       ORDER BY r.hold_expires_at, r.reservation_id
-       LIMIT $1
-       FOR UPDATE OF r, u SKIP LOCKED`,
-      [JOB_BATCH_SIZE],
-    );
-    let released = 0;
-    for (const row of expiredHolds.rows) {
-      const reservation = await client.query(
-        `UPDATE ${hot}.reservations
-         SET status = 'EXPIRED'
-         WHERE reservation_id = $1 AND status = 'ACTIVE'
-         RETURNING reservation_id`,
-        [row.reservation_id],
-      );
-      if (reservation.rowCount === 0) continue;
-      const unit = await client.query(
-        `UPDATE ${hot}.blood_units
-         SET status = CASE
-           WHEN expiry_date > CURRENT_DATE THEN 'AVAILABLE'::common.unit_status_t
-           ELSE 'EXPIRED'::common.unit_status_t
-         END
-         WHERE unit_id = $1 AND status = 'RESERVED'
-         RETURNING unit_id`,
-        [row.unit_id],
-      );
-      if (unit.rowCount > 0) released += 1;
-    }
-
-    const expiredUnits = await client.query(
-      `SELECT unit_id
-       FROM ${hot}.blood_units
-       WHERE expiry_date <= CURRENT_DATE
-         AND status IN ('QUARANTINE', 'AVAILABLE', 'RESERVED')
-       ORDER BY expiry_date, unit_id
-       LIMIT $1
-       FOR UPDATE SKIP LOCKED`,
-      [JOB_BATCH_SIZE],
-    );
-    let expired = 0;
-    for (const row of expiredUnits.rows) {
-      await client.query(
-        `UPDATE ${hot}.reservations
-         SET status = 'EXPIRED'
-         WHERE unit_id = $1 AND status = 'ACTIVE'`,
-        [row.unit_id],
-      );
-      const unit = await client.query(
-        `UPDATE ${hot}.blood_units
-         SET status = 'EXPIRED'
-         WHERE unit_id = $1
-           AND expiry_date <= CURRENT_DATE
+      const expiredUnits = await client.query(
+        `SELECT unit_id, status
+         FROM ${hot}.blood_units
+         WHERE expiry_date <= CURRENT_DATE
            AND status IN ('QUARANTINE', 'AVAILABLE', 'RESERVED')
-         RETURNING unit_id`,
-        [row.unit_id],
+         ORDER BY expiry_date, unit_id
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED`,
+        [JOB_BATCH_SIZE],
       );
-      if (unit.rowCount > 0) expired += 1;
-    }
+      let expired = 0;
+      for (const row of expiredUnits.rows) {
+        if (row.status === "QUARANTINE") {
+          await client.query(
+            `UPDATE ${hot}.blood_units
+             SET status = 'AVAILABLE'::common.unit_status_t
+             WHERE unit_id = $1 AND status = 'QUARANTINE'
+               AND expiry_date <= CURRENT_DATE`,
+            [row.unit_id],
+          );
+        }
+        await client.query(
+          `UPDATE ${hot}.reservations
+           SET status = 'EXPIRED'
+           WHERE unit_id = $1 AND status = 'ACTIVE'`,
+          [row.unit_id],
+        );
+        const unit = await client.query(
+          `UPDATE ${hot}.blood_units
+           SET status = 'EXPIRED'::common.unit_status_t
+           WHERE unit_id = $1
+             AND expiry_date <= CURRENT_DATE
+             AND status IN ('AVAILABLE', 'RESERVED')
+           RETURNING unit_id`,
+          [row.unit_id],
+        );
+        if (unit.rowCount > 0) expired += 1;
+      }
 
-    const replicaState = await client.query(
-      `SELECT last_applied_event_id
-       FROM ${read}.replication_state
-       WHERE id = TRUE
-       FOR UPDATE SKIP LOCKED`,
-    );
-    let archivedOutboxRows = 0;
-    if (replicaState.rowCount > 0) {
-      const archived = await client.query(
-        `DELETE FROM ${hot}.outbox
-         WHERE event_id <= $1 AND created_at < now() - interval '1 day'`,
-        [replicaState.rows[0].last_applied_event_id],
+      const replicaState = await client.query(
+        `SELECT last_applied_event_id
+         FROM ${read}.replication_state
+         WHERE id = TRUE
+         FOR UPDATE SKIP LOCKED`,
       );
-      archivedOutboxRows = archived.rowCount;
+      let archivedOutboxRows = 0;
+      if (replicaState.rowCount > 0) {
+        const archived = await client.query(
+          `DELETE FROM ${hot}.outbox
+           WHERE event_id <= $1 AND created_at < now() - interval '1 day'`,
+          [replicaState.rows[0].last_applied_event_id],
+        );
+        archivedOutboxRows = archived.rowCount;
+      }
+      return { released, expired, archivedOutboxRows };
+    });
+  } catch (error) {
+    if (error.code === "SHARD_WRITE_UNAVAILABLE") {
+      return { skipped: "SIMULATED_PRIMARY_DOWN" };
     }
-    return { released, expired, archivedOutboxRows };
-  });
+    throw error;
+  }
 }
 
 export async function runMaintenanceOnce() {
@@ -108,18 +124,11 @@ export async function runMaintenanceOnce() {
 
 export async function applyReplicaBatch(cityCode, limit = REPLICA_BATCH_SIZE) {
   const { hot, read } = schemasFor(cityCode);
-  const client = await connectWithRetry();
+  const client = await connectWithRetryFor(getPoolForCity(cityCode))();
   try {
+    const flags = await getChaosFlag(cityCode);
+    if (flags.replicaDown) return { applied: 0, skipped: "SIMULATED_REPLICA_DOWN" };
     await client.query("BEGIN");
-    const flags = await client.query(
-      `SELECT replica_down, extra_lag_ms
-       FROM catalog.chaos_flags WHERE city_code = $1`,
-      [cityCode],
-    );
-    if (!flags.rows[0] || flags.rows[0].replica_down) {
-      await client.query("COMMIT");
-      return { applied: 0, skipped: "SIMULATED_REPLICA_DOWN" };
-    }
 
     await client.query(
       `INSERT INTO ${read}.replication_state (id)
@@ -149,7 +158,7 @@ export async function applyReplicaBatch(cityCode, limit = REPLICA_BATCH_SIZE) {
       [
         state.rows[0].last_applied_event_id,
         env.replicaLagMs,
-        flags.rows[0].extra_lag_ms,
+         flags.extraLagMs,
         limit,
       ],
     );

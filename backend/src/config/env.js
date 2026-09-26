@@ -12,13 +12,55 @@ function numberFromEnv(name, fallback, { min, max } = {}) {
 function requiredSecret(name) {
   const value = process.env[name];
   if (!value || value.length < 32) {
-    throw new Error(`${name} must be configured in Replit Secrets with at least 32 characters.`);
+    throw new Error(`${name} must be configured in the environment with at least 32 characters.`);
   }
   return value;
 }
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL must be provided by Replit PostgreSQL.");
+// Topology detection. `single` keeps the original one-instance layout working
+// unchanged; `distributed` gives every city its own node plus a dedicated
+// catalog node. Why infer instead of requiring a flag: an unset DB_MODE with
+// only DATABASE_URL set is the legacy single-box setup, and silently
+// breaking it on upgrade would be worse than an explicit error later.
+function detectDatabaseMode() {
+  const raw = (process.env.DB_MODE ?? "").trim().toLowerCase();
+  if (raw) {
+    if (raw !== "single" && raw !== "distributed") {
+      throw new Error('DB_MODE must be either "single" or "distributed".');
+    }
+    return raw;
+  }
+  const perCity = ["KHI_DATABASE_URL", "LHE_DATABASE_URL", "ISB_DATABASE_URL"].filter(
+    (name) => process.env[name],
+  );
+  return perCity.length > 0 ? "distributed" : "single";
+}
+
+const databaseMode = detectDatabaseMode();
+
+// In distributed mode catalog and common live on their own node, and each city
+// node needs its own URL. In single mode every schema shares DATABASE_URL, so
+// the per-city variables stay undefined and the registry routes them all to the
+// one pool instead of building pools it would never use.
+if (databaseMode === "single" && !process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL must be provided in single-node mode.");
+}
+
+if (databaseMode === "distributed") {
+  const missing = [
+    ["CATALOG_DATABASE_URL", process.env.CATALOG_DATABASE_URL],
+    ["KHI_DATABASE_URL", process.env.KHI_DATABASE_URL],
+    ["LHE_DATABASE_URL", process.env.LHE_DATABASE_URL],
+    ["ISB_DATABASE_URL", process.env.ISB_DATABASE_URL],
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+  if (missing.length > 0) {
+    throw new Error(
+      `DB_MODE=distributed requires ${missing.join(", ")}. ` +
+        "Every node must be reachable, otherwise city traffic has nowhere to go.",
+    );
+  }
 }
 
 const jwtSecret = requiredSecret("JWT_SECRET");
@@ -37,7 +79,14 @@ const jwtRefreshSecret = Buffer.from(
 
 export const env = Object.freeze({
   port: numberFromEnv("PORT", 8080, { min: 1, max: 65535 }),
+  databaseMode,
   databaseUrl: process.env.DATABASE_URL,
+  catalogDatabaseUrl: process.env.CATALOG_DATABASE_URL ?? process.env.DATABASE_URL,
+  cityDatabaseUrls: Object.freeze({
+    KHI: process.env.KHI_DATABASE_URL ?? process.env.DATABASE_URL,
+    LHE: process.env.LHE_DATABASE_URL ?? process.env.DATABASE_URL,
+    ISB: process.env.ISB_DATABASE_URL ?? process.env.DATABASE_URL,
+  }),
   jwtSecret,
   jwtRefreshSecret,
   corsOrigins: (process.env.CORS_ORIGINS ?? "")

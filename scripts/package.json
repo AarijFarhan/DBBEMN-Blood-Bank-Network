@@ -12,6 +12,7 @@
     "tsx": "catalog:"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.2",
     "pg": "8.23.0"
   }
 }

@@ -53,6 +53,33 @@ export const createUserSchema = z.object({
   donorCityCode: cityCodeSchema.optional(),
 });
 
+export const entityIdParamSchema = z.object({ entityId: uuidSchema });
+export const donorDeleteQuerySchema = z.object({ city: cityCodeSchema });
+
+export const donorRequestIdParamSchema = z.object({ requestId: uuidSchema });
+
+export const createDonorRequestSchema = z.object({
+  donorId: uuidSchema,
+  cityCode: cityCodeSchema,
+  patientRef: z.string().trim().max(120).optional(),
+  requiredBloodGroup: bloodGroupSchema,
+  requiredRh: rhSchema,
+  urgency: urgencySchema.default("ROUTINE"),
+  slotsRequested: z.number().int().min(1).max(10).default(1),
+  notes: z.string().trim().max(1000).optional(),
+});
+
+export const respondDonorRequestSchema = z.object({
+  response: z.enum(["ACCEPTED", "DECLINED"]),
+  responseNotes: z.string().trim().max(500).optional(),
+});
+
+export const donorRequestQuerySchema = z.object({
+  city: cityCodeSchema.optional(),
+  status: z.enum(["PENDING", "ACCEPTED", "DECLINED", "CANCELLED", "EXPIRED"]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
 export const reservationRequestSchema = z.object({
   requestId: uuidSchema,
   hospitalId: uuidSchema,

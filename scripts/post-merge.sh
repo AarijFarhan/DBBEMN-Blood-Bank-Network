@@ -1,4 +1,4 @@
-#!/bin/bash
-set -e
+#!/bin/sh
+set -eu
 pnpm install --frozen-lockfile
-pnpm --filter db push
+pnpm run migrate

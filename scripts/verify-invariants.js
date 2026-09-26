@@ -66,10 +66,12 @@ async function verifyCity(cityCode) {
   for (const [name, sql] of Object.entries(checks)) {
     result[name] = await count(pool, sql);
   }
-  result.I2 = result.I2_units + result.I2_reservations;
+  const i2 = result.I2_units + result.I2_reservations;
   delete result.I2_units;
   delete result.I2_reservations;
-  return result;
+  // Why: reassigning the key would move I2 to the end of the insertion order and
+  // make the summary line unreadable, so rebuild the object as I1..I5.
+  return { I1: result.I1, I2: i2, I3: result.I3, I4: result.I4, I5: result.I5 };
 }
 
 async function main() {

@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { env } from "../config/env.js";
 import { schemasFor } from "../db/shard-router.js";
-import { withSerializableRetry } from "../db/pool.js";
+import { withSerializableRetryFor } from "../db/pool.js";
+import { getPoolForCity } from "../db/registry.js";
 import { AppError } from "../middleware/errors.js";
+import { assertCityWritable } from "./chaos.js";
+
+export { assertCityWritable };
 
 function hashRequest(request, unitId = null) {
   const canonical = [
@@ -17,22 +22,6 @@ function hashRequest(request, unitId = null) {
     unitId,
   ];
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
-}
-
-export async function assertCityWritable(client, cityCode) {
-  const result = await client.query(
-    `SELECT primary_down FROM catalog.chaos_flags WHERE city_code = $1`,
-    [cityCode],
-  );
-  if (result.rows[0]?.primary_down) {
-    throw new AppError(
-      503,
-      "SHARD_WRITE_UNAVAILABLE",
-      `Writes for ${cityCode} are unavailable.`,
-      { cityCode, simulation: "SIMULATED" },
-      { "Retry-After": "5" },
-    );
-  }
 }
 
 async function claimRequest(client, hot, request, requestHash) {
@@ -65,7 +54,7 @@ async function claimRequest(client, hot, request, requestHash) {
 
 async function createReservation(client, hot, request, cityCode, unit) {
   const reservationId = randomUUID();
-  const holdMinutes = request.urgency === "CRITICAL" ? 60 : 30;
+  const holdMinutes = request.urgency === "CRITICAL" ? env.criticalHoldMinutes : env.holdMinutes;
 
   const updatedUnit = await client.query(
     `UPDATE ${hot}.blood_units
@@ -108,7 +97,7 @@ async function createReservation(client, hot, request, cityCode, unit) {
 export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request);
-  return withSerializableRetry(async (client) => {
+  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const cached = await claimRequest(client, hot, request, requestHash);
     if (cached) return cached;
@@ -164,7 +153,7 @@ export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
 export async function reserveSpecificUnit(cityCode, request, unitId) {
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request, unitId);
-  return withSerializableRetry(async (client) => {
+  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const cached = await claimRequest(client, hot, request, requestHash);
     if (cached) return cached;
@@ -221,11 +210,12 @@ export async function reserveSpecificUnit(cityCode, request, unitId) {
 }
 
 export async function compensateCityReservations(cityCode, request, reservations) {
-  if (reservations.length === 0) return;
+  if (reservations.length === 0) return { cityCode, compensated: 0 };
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request);
-  return withSerializableRetry(async (client) => {
+  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
+    let compensated = 0;
     for (const reservation of reservations) {
       const current = await client.query(
         `SELECT r.reservation_id, r.unit_id, r.status, u.expiry_date
@@ -236,22 +226,42 @@ export async function compensateCityReservations(cityCode, request, reservations
          FOR UPDATE OF r, u`,
         [reservation.reservationId, request.requestId, request.hospitalId],
       );
-      if (current.rowCount === 0 || current.rows[0].status !== "ACTIVE") continue;
-      await client.query(
+      if (current.rowCount === 0) {
+        throw new AppError(409, "RESERVATION_COMPENSATION_FAILED", "A reservation could not be locked for compensation.");
+      }
+      const row = current.rows[0];
+      if (["CANCELLED", "EXPIRED"].includes(row.status)) continue;
+      if (row.status !== "ACTIVE") {
+        throw new AppError(409, "RESERVATION_COMPENSATION_FAILED", "A reservation changed before compensation.");
+      }
+      const cancelled = await client.query(
         `UPDATE ${hot}.reservations
          SET status = 'CANCELLED', cancelled_at = now(),
              cancel_reason = 'CROSS_CITY_COMPENSATION'
-         WHERE reservation_id = $1 AND status = 'ACTIVE'`,
+         WHERE reservation_id = $1 AND status = 'ACTIVE'
+         RETURNING reservation_id`,
         [reservation.reservationId],
       );
-      const nextUnitStatus = new Date(current.rows[0].expiry_date) <= new Date()
-        ? "EXPIRED"
-        : "AVAILABLE";
-      await client.query(
-        `UPDATE ${hot}.blood_units SET status = $1::common.unit_status_t
-         WHERE unit_id = $2 AND status = 'RESERVED'`,
-        [nextUnitStatus, current.rows[0].unit_id],
+      if (cancelled.rowCount !== 1) {
+        throw new AppError(409, "RESERVATION_COMPENSATION_FAILED", "A reservation changed before compensation.");
+      }
+      const nextStatus = await client.query(
+        `SELECT CASE WHEN $1::date > CURRENT_DATE
+                     THEN 'AVAILABLE'::common.unit_status_t
+                     ELSE 'EXPIRED'::common.unit_status_t END AS status`,
+        [row.expiry_date],
       );
+      const unit = await client.query(
+        `UPDATE ${hot}.blood_units
+         SET status = $1::common.unit_status_t
+         WHERE unit_id = $2 AND status = 'RESERVED'
+         RETURNING unit_id`,
+        [nextStatus.rows[0].status, row.unit_id],
+      );
+      if (unit.rowCount !== 1) {
+        throw new AppError(409, "RESERVATION_COMPENSATION_FAILED", "A unit changed before compensation.");
+      }
+      compensated += 1;
     }
     const stored = await client.query(
       `SELECT request_hash FROM ${hot}.processed_requests
@@ -266,5 +276,6 @@ export async function compensateCityReservations(cityCode, request, reservations
         [request.requestId, cityCode],
       );
     }
+    return { cityCode, compensated };
   });
 }

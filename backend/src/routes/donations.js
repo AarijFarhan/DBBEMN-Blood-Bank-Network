@@ -2,12 +2,14 @@ import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
-import { pool, withSerializableRetry } from "../db/pool.js";
+import { withSerializableRetryFor } from "../db/pool.js";
+import { getPoolForCity } from "../db/registry.js";
 import { env } from "../config/env.js";
 import { authenticate, requireBankScope, requireRole } from "../middleware/auth.js";
 import { AppError, asyncRoute } from "../middleware/errors.js";
 import { parseQuery, validate } from "../middleware/validate.js";
 import { getActiveBank } from "../services/catalog.js";
+import { assertCityWritable } from "../services/chaos.js";
 import {
   cityCodeSchema,
   componentSchema,
@@ -62,8 +64,9 @@ router.post(
     const donationId = randomUUID();
     const unitIds = body.components.map(() => randomUUID());
 
-    const created = await withSerializableRetry(async (client) => {
-      const donorResult = await client.query(
+     const created = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+       await assertCityWritable(client, cityCode);
+       const donorResult = await client.query(
         `SELECT donor_id, date_of_birth, weight_kg, last_donation_date,
                 is_available, blood_group::text AS blood_group, rh_factor::text AS rh_factor
          FROM ${hist}.donors
@@ -149,8 +152,9 @@ router.patch(
     const cityCode = bank.city_code.trim();
     const { hot, hist } = schemasFor(cityCode);
 
-    const result = await withSerializableRetry(async (client) => {
-      const found = await client.query(
+     const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+       await assertCityWritable(client, cityCode);
+       const found = await client.query(
         `SELECT donation_id, donor_id, blood_bank_id, screening_status, collected_at
          FROM ${hist}.donations
          WHERE donation_id = $1
@@ -224,7 +228,7 @@ router.get(
     const rows = await Promise.all(
       cities.map(async (cityCode) => {
         const { hist } = schemasFor(cityCode);
-        const result = await pool.query(
+        const result = await getPoolForCity(cityCode).query(
           `SELECT d.donation_id AS "donationId", d.donor_id AS "donorId",
                   d.blood_bank_id AS "bloodBankId", d.collected_at AS "collectedAt",
                   d.volume_ml AS "volumeMl", d.screening_status AS "screeningStatus",

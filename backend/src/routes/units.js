@@ -1,11 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
-import { pool, withSerializableRetry } from "../db/pool.js";
+import { withSerializableRetryFor } from "../db/pool.js";
+import { getPoolForCity } from "../db/registry.js";
 import { authenticate, requireBankScope, requireRole } from "../middleware/auth.js";
 import { AppError, asyncRoute } from "../middleware/errors.js";
 import { parseQuery } from "../middleware/validate.js";
 import { getActiveBank } from "../services/catalog.js";
+import { assertCityWritable } from "../services/chaos.js";
 import { cityCodeSchema, uuidSchema } from "../utils/validators.js";
 
 const router = Router();
@@ -29,7 +31,7 @@ const cityQuerySchema = z.object({ city: cityCodeSchema.optional() });
 async function readUnit(unitId, cities) {
   for (const cityCode of cities) {
     const { hot } = schemasFor(cityCode);
-    const result = await pool.query(
+    const result = await getPoolForCity(cityCode).query(
       `SELECT unit_id AS "unitId", donation_id AS "donationId",
               blood_bank_id AS "bloodBankId", blood_group AS "bloodGroup",
               rh_factor AS "rhFactor", component_type AS "componentType",
@@ -71,7 +73,7 @@ router.get(
     const result = await Promise.all(
       cities.map(async (cityCode) => {
         const { hot } = schemasFor(cityCode);
-        const units = await pool.query(
+        const units = await getPoolForCity(cityCode).query(
           `SELECT unit_id AS "unitId", donation_id AS "donationId",
                   blood_bank_id AS "bloodBankId", blood_group AS "bloodGroup",
                   rh_factor AS "rhFactor", component_type AS "componentType",
@@ -122,9 +124,10 @@ router.patch(
     const cities = await accessibleCities(req, query.city);
 
     for (const cityCode of cities) {
-      const { hot } = schemasFor(cityCode);
-      const changed = await withSerializableRetry(async (client) => {
-        const current = await client.query(
+       const { hot } = schemasFor(cityCode);
+       const changed = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+         await assertCityWritable(client, cityCode);
+         const current = await client.query(
           `SELECT unit_id, blood_bank_id, status
            FROM ${hot}.blood_units WHERE unit_id = $1 FOR UPDATE`,
           [id.data],

@@ -27,6 +27,10 @@ node_modules
 !.vscode/launch.json
 !.vscode/extensions.json
 
+# local secrets
+.env
+.env.local
+
 # misc
 /.sass-cache
 /connect.lock
@@ -44,6 +48,6 @@ Thumbs.db
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
-# Replit
+# Tooling caches
 .cache/
 .local/

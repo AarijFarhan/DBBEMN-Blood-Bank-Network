@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import { AppError, asyncRoute } from "./errors.js";
 import { env } from "../config/env.js";
-import { pool } from "../db/pool.js";
+import { getCatalogPool } from "../db/registry.js";
 
 export const authenticate = asyncRoute(async (req, _res, next) => {
   const authorization = req.get("authorization");
@@ -23,7 +23,7 @@ export const authenticate = asyncRoute(async (req, _res, next) => {
     throw new AppError(401, "INVALID_ACCESS_TOKEN", "The access token is invalid.");
   }
 
-  const user = await pool.query(
+  const user = await getCatalogPool().query(
     `SELECT user_id, username, email, role, hospital_id, blood_bank_id,
             donor_id, donor_city_code, is_active
      FROM catalog.users

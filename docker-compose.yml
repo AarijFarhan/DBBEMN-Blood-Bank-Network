@@ -1,0 +1,100 @@
+# Distributed PostgreSQL topology for DBBEMN.
+#
+#   db-catalog : catalog + common schemas. Every authenticated request reads
+#                catalog.users, so this node is the auth hot path. It holds no
+#                city inventory, donors or blood units.
+#   db-khi     : khi_hot / khi_history / khi_read
+#   db-lhe     : lhe_hot / lhe_history / lhe_read
+#   db-isb     : isb_hot / isb_history / isb_read
+#
+# All four nodes get 00-common.sql because the city shard tables declare columns
+# as common.blood_group_t, common.rh_t, common.unit_status_t and call
+# common.compatible_donor(). Without it a city node cannot even create its own
+# tables, let alone serve a query.
+#
+# Start:  docker compose up -d
+# Apply:  pnpm migrate        (fan-out version, idempotent)
+# The backend is NOT started here on purpose: run `pnpm start` on the host so it
+# can reach the published ports and reuse the existing dev workflow.
+
+x-pg-common: &pg-common
+  image: postgres:18-alpine
+  restart: unless-stopped
+  shm_size: 256mb
+  environment: &pg-env
+    POSTGRES_USER: ${POSTGRES_USER:-dbbemn}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dbbemn}
+    POSTGRES_DB: ${POSTGRES_DB:-dbbemn}
+  # Only first boot on an empty volume runs these. After that the volume owns the
+  # schema, so changing a migration file here has no effect; use `pnpm migrate`.
+  volumes: &pg-init-all
+    - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -q"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 20s
+
+services:
+  db-catalog:
+    <<: *pg-common
+    container_name: dbbemn-db-catalog
+    ports:
+      - "${CATALOG_PORT:-5436}:5432"
+    environment:
+      <<: *pg-env
+      # No CITY_CODE: this node must not create any *_hot / *_history / *_read.
+    volumes:
+      - catalog-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/10-catalog.sql:/docker-entrypoint-initdb.d/10-catalog.sql:ro
+
+  db-khi:
+    <<: *pg-common
+    container_name: dbbemn-db-khi
+    ports:
+      - "${KHI_PORT:-5433}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: KHI
+    volumes:
+      - khi-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      # Read-only: the city schemas are rendered from these migrations at boot.
+      - ./db/migrations:/migrations:ro
+
+  db-lhe:
+    <<: *pg-common
+    container_name: dbbemn-db-lhe
+    ports:
+      - "${LHE_PORT:-5434}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: LHE
+    volumes:
+      - lhe-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+  db-isb:
+    <<: *pg-common
+    container_name: dbbemn-db-isb
+    ports:
+      - "${ISB_PORT:-5435}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: ISB
+    volumes:
+      - isb-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+volumes:
+  catalog-data:
+  khi-data:
+  lhe-data:
+  isb-data:

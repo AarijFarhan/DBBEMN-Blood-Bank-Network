@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { pool } from "../backend/src/db/pool.js";
+import { allScriptPools, connectWithRetryFor, endAllScriptPools } from "./db.js";
 
 function promptLine(label) {
   return new Promise((resolve, reject) => {
@@ -27,7 +27,7 @@ function promptLine(label) {
       process.stdin.pause();
     };
     if (!process.stdin.isTTY) {
-      reject(new Error("Run this command from an interactive Replit shell."));
+      reject(new Error("Run this command from an interactive terminal."));
       return;
     }
     process.stdin.setRawMode(true);
@@ -63,7 +63,7 @@ function promptPassword(label) {
       process.stdin.pause();
     };
     if (!process.stdin.isTTY) {
-      reject(new Error("Run this command from an interactive Replit shell."));
+      reject(new Error("Run this command from an interactive terminal."));
       return;
     }
     process.stdin.setRawMode(true);
@@ -81,7 +81,11 @@ async function main() {
   }
 
   const passwordHash = await bcrypt.hash(password, 12);
-  const client = await pool.connect();
+  // System admins live in catalog.users, so this must target the catalog node in
+  // distributed mode. In single mode the only entry is labelled "single".
+  const nodes = allScriptPools();
+  const target = nodes.find((node) => node.label === "catalog") ?? nodes[0];
+  const client = await connectWithRetryFor(target.pool)();
   try {
     await client.query("BEGIN");
     // Why: serializes concurrent first-admin setup without a session advisory lock.
@@ -98,7 +102,7 @@ async function main() {
       [randomUUID(), username, email, passwordHash],
     );
     await client.query("COMMIT");
-    process.stdout.write("Created the initial system administrator.\n");
+    process.stdout.write(`Created the initial system administrator on node "${target.label}".\n`);
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;
@@ -113,5 +117,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await pool.end();
+    await endAllScriptPools();
   });

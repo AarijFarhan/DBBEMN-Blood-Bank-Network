@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
-import { pool, withSerializableRetry } from "../db/pool.js";
+import { withSerializableRetryFor } from "../db/pool.js";
+import { getCatalogPool, getPoolForCity } from "../db/registry.js";
 import { authenticate, requireBankScope, requireHospitalScope, requireRole } from "../middleware/auth.js";
 import { AppError, asyncRoute } from "../middleware/errors.js";
 import { parseQuery, validate } from "../middleware/validate.js";
@@ -46,7 +47,7 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 
 async function rankedCityCodes(hospital, scope) {
   if (scope === "LOCAL_FIRST") return [hospital.city_code.trim()];
-  const cities = await pool.query(
+  const cities = await getCatalogPool().query(
     `SELECT city_code, latitude, longitude FROM catalog.cities`,
   );
   const originLat = Number(hospital.latitude ?? cities.rows.find((city) =>
@@ -91,7 +92,7 @@ async function writableCitiesForUser(req, requestedCity) {
 
 async function readReservation(cityCode, reservationId) {
   const { hot } = schemasFor(cityCode);
-  const result = await pool.query(
+  const result = await getPoolForCity(cityCode).query(
     `SELECT r.reservation_id AS "reservationId", r.request_id AS "requestId",
             r.unit_id AS "unitId", r.hospital_id AS "hospitalId",
             r.hospital_city_code AS "hospitalCityCode",
@@ -142,7 +143,7 @@ async function lockReservation(client, hot, reservationId) {
 
 async function doDispatch(cityCode, reservationId, bankId) {
   const { hot } = schemasFor(cityCode);
-  return withSerializableRetry(async (client) => {
+  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const row = await lockReservation(client, hot, reservationId);
     if (!row) throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
@@ -176,7 +177,7 @@ async function doDispatch(cityCode, reservationId, bankId) {
 
 async function doTransfuse(cityCode, reservationId, hospitalId, body) {
   const { hot, hist } = schemasFor(cityCode);
-  return withSerializableRetry(async (client) => {
+  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const row = await lockReservation(client, hot, reservationId);
     if (!row) throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
@@ -215,7 +216,7 @@ async function doTransfuse(cityCode, reservationId, hospitalId, body) {
 
 async function doCancel(cityCode, reservationId, reason) {
   const { hot } = schemasFor(cityCode);
-  return withSerializableRetry(async (client) => {
+  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const row = await lockReservation(client, hot, reservationId);
     if (!row) throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
@@ -282,9 +283,33 @@ router.post(
     }
 
     const reservations = cityResults.flatMap((result) => result.reservations);
+    const reservationsByCity = Object.fromEntries(
+      cityResults.map((result) => [result.cityCode, result.reservations]),
+    );
     if (remaining > 0 && !request.allowPartial) {
-      for (const result of cityResults) {
-        await compensateCityReservations(result.cityCode, request, result.reservations);
+      const compensationResults = await Promise.allSettled(
+        cityResults.map((result) => compensateCityReservations(result.cityCode, request, result.reservations)),
+      );
+      const compensationFailures = compensationResults
+        .map((result, index) => ({ result, cityCode: cityResults[index].cityCode }))
+        .filter(({ result }) => result.status === "rejected");
+      if (compensationFailures.length > 0) {
+        throw new AppError(
+          503,
+          "RESERVATION_COMPENSATION_FAILED",
+          "The reservation could not be fully rolled back.",
+          {
+            requested: request.unitsNeeded,
+            unavailableCities,
+            compensated: false,
+            compensation: compensationResults.map((result, index) => ({
+              cityCode: cityResults[index].cityCode,
+              status: result.status,
+              compensated: result.status === "fulfilled" ? result.value.compensated : 0,
+            })),
+          },
+          { "Retry-After": "5" },
+        );
       }
       if (reservations.length === 0 && unavailableCities.length > 0) {
         throw new AppError(
@@ -299,6 +324,7 @@ router.post(
         requested: request.unitsNeeded,
         unavailableCities,
         compensated: true,
+        reservationsByCity,
       });
     }
     if (reservations.length === 0 && unavailableCities.length > 0) {
@@ -313,6 +339,7 @@ router.post(
     res.json({
       requestId: request.requestId,
       reservations,
+      reservationsByCity,
       unavailableCities,
       partial: remaining > 0 || unavailableCities.length > 0,
     });
@@ -376,7 +403,7 @@ router.get(
 
     const rows = await Promise.all(cities.map(async (cityCode) => {
       const { hot } = schemasFor(cityCode);
-      const result = await pool.query(
+      const result = await getPoolForCity(cityCode).query(
         `SELECT r.reservation_id AS "reservationId", r.request_id AS "requestId",
                 r.unit_id AS "unitId", r.hospital_id AS "hospitalId",
                 r.patient_blood_group AS "patientBloodGroup", r.patient_rh AS "patientRh",
