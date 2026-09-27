@@ -13,6 +13,8 @@ import {
   reserveSpecificUnit,
   reserveUnitsInCity,
 } from "../services/reservations.js";
+import { invalidateCityInventory } from "../cache/store.js";
+import { KIND, locateAcrossCities } from "../services/presence.js";
 import {
   cityCodeSchema,
   manualReservationSchema,
@@ -112,18 +114,29 @@ async function readReservation(cityCode, reservationId) {
 
 async function locateReservation(req, reservationId, requestedCity) {
   const cities = await writableCitiesForUser(req, requestedCity);
-  for (const cityCode of cities) {
-    const reservation = await readReservation(cityCode, reservationId);
-    if (!reservation) continue;
-    if (req.user.role === "HOSPITAL_ADMIN") {
-      requireHospitalScope(req, reservation.hospitalId);
-    }
-    if (req.user.role === "BLOODBANK_ADMIN") {
-      requireBankScope(req, reservation.bloodBankId);
-    }
-    return reservation;
+  // The presence lookup only skips *read* work. Scope checks still run on every
+  // match, so a narrowing can never hand a user a reservation from outside their
+  // tenant — it can only fail to find one, which the full scan would also do.
+  const reservation = await locateAcrossCities(
+    KIND.RESERVATION,
+    reservationId,
+    cities,
+    async (cityCode) => {
+      const found = await readReservation(cityCode, reservationId);
+      if (!found) return null;
+      if (req.user.role === "HOSPITAL_ADMIN") {
+        requireHospitalScope(req, found.hospitalId);
+      }
+      if (req.user.role === "BLOODBANK_ADMIN") {
+        requireBankScope(req, found.bloodBankId);
+      }
+      return found;
+    },
+  );
+  if (!reservation) {
+    throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
   }
-  throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
+  return reservation;
 }
 
 async function lockReservation(client, hot, reservationId) {
@@ -143,7 +156,7 @@ async function lockReservation(client, hot, reservationId) {
 
 async function doDispatch(cityCode, reservationId, bankId) {
   const { hot } = schemasFor(cityCode);
-  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const row = await lockReservation(client, hot, reservationId);
     if (!row) throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
@@ -173,11 +186,15 @@ async function doDispatch(cityCode, reservationId, bankId) {
     if (unit.rowCount !== 1) throw new AppError(409, "UNIT_NOT_RESERVED", "The reserved unit is no longer available.");
     return { ...reservation.rows[0], cityCode };
   });
+  // The unit left the available pool, so any cached search for this city that
+  // still lists it is now offering blood that is already in transit.
+  await invalidateCityInventory(cityCode);
+  return result;
 }
 
 async function doTransfuse(cityCode, reservationId, hospitalId, body) {
   const { hot, hist } = schemasFor(cityCode);
-  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const row = await lockReservation(client, hot, reservationId);
     if (!row) throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
@@ -212,11 +229,13 @@ async function doTransfuse(cityCode, reservationId, hospitalId, body) {
     );
     return { ...reservation.rows[0], cityCode };
   });
+  await invalidateCityInventory(cityCode);
+  return result;
 }
 
 async function doCancel(cityCode, reservationId, reason) {
   const { hot } = schemasFor(cityCode);
-  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const row = await lockReservation(client, hot, reservationId);
     if (!row) throw new AppError(404, "RESERVATION_NOT_FOUND", "The reservation was not found.");
@@ -251,6 +270,10 @@ async function doCancel(cityCode, reservationId, reason) {
     if (unit.rowCount !== 1) throw new AppError(409, "UNIT_STATE_MISMATCH", "The unit state changed before cancellation.");
     return { ...cancelled.rows[0], unitStatus: unit.rows[0].status, cityCode };
   });
+  // Cancellation returns the unit to the pool, so cached results for this city
+  // that omit it are under-reporting stock.
+  await invalidateCityInventory(cityCode);
+  return result;
 }
 
 router.post(

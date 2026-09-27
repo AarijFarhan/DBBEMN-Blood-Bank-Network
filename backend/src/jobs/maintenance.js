@@ -1,8 +1,9 @@
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { connectWithRetryFor, withSerializableRetryFor } from "../db/pool.js";
-import { getPoolForCity } from "../db/registry.js";
+import { allCityPools, getPoolForCity } from "../db/registry.js";
 import { env } from "../config/env.js";
 import { assertCityWritable, getChaosFlag } from "../services/chaos.js";
+import { invalidateCityInventory } from "../cache/store.js";
 
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const REPLICA_INTERVAL_MS = 1_000;
@@ -15,7 +16,7 @@ export async function sweepCity(cityCode) {
     const flag = await getChaosFlag(cityCode);
     if (flag.primaryDown) return { skipped: "SIMULATED_PRIMARY_DOWN" };
     const withSerializableRetry = withSerializableRetryFor(getPoolForCity(cityCode));
-    return await withSerializableRetry(async (client) => {
+    const result = await withSerializableRetry(async (client) => {
       await assertCityWritable(client, cityCode);
       const expiredHolds = await client.query(
         `SELECT r.reservation_id, r.unit_id, u.expiry_date
@@ -106,6 +107,14 @@ export async function sweepCity(cityCode) {
       }
       return { released, expired, archivedOutboxRows };
     });
+    // Expiry and hold-release change which units are available, so any cached
+    // search or summary for this city is now wrong. Bump after the commit
+    // succeeds, and only when something actually changed, so the 30s sweep does
+    // not invalidate every cache entry on every idle tick.
+    if (result.released > 0 || result.expired > 0) {
+      await invalidateCityInventory(cityCode);
+    }
+    return result;
   } catch (error) {
     if (error.code === "SHARD_WRITE_UNAVAILABLE") {
       return { skipped: "SIMULATED_PRIMARY_DOWN" };
@@ -163,10 +172,18 @@ export async function applyReplicaBatch(cityCode, limit = REPLICA_BATCH_SIZE) {
       ],
     );
 
+    // Whether this batch changed which units a search can see. Tracked per batch
+    // so the cache is invalidated once at the end rather than per event.
+    let visibilityChanged = false;
     for (const event of events.rows) {
       const payload = event.payload;
       if (payload.status === "AVAILABLE" && new Date(payload.expiry_date) > new Date()) {
-        await client.query(
+        // `xmax = 0` distinguishes a genuine insert from an update of a row that
+        // was already in the search set. Only the former changes what a search
+        // returns; re-applying identical values must not throw the cache away,
+        // because the applier runs every second and would invalidate it
+        // continuously.
+        const upserted = await client.query(
           `INSERT INTO ${read}.units_search
              (unit_id, blood_bank_id, blood_group, rh_factor, component_type,
               volume_ml, collected_on, expiry_date)
@@ -179,7 +196,8 @@ export async function applyReplicaBatch(cityCode, limit = REPLICA_BATCH_SIZE) {
              component_type = EXCLUDED.component_type,
              volume_ml = EXCLUDED.volume_ml,
              collected_on = EXCLUDED.collected_on,
-             expiry_date = EXCLUDED.expiry_date`,
+             expiry_date = EXCLUDED.expiry_date
+           RETURNING (xmax = 0) AS inserted`,
           [
             payload.unit_id,
             payload.blood_bank_id,
@@ -191,11 +209,13 @@ export async function applyReplicaBatch(cityCode, limit = REPLICA_BATCH_SIZE) {
             payload.expiry_date,
           ],
         );
+        if (upserted.rows[0]?.inserted === true) visibilityChanged = true;
       } else {
-        await client.query(
-          `DELETE FROM ${read}.units_search WHERE unit_id = $1`,
+        const removed = await client.query(
+          `DELETE FROM ${read}.units_search WHERE unit_id = $1 RETURNING unit_id`,
           [payload.unit_id],
         );
+        if (removed.rowCount > 0) visibilityChanged = true;
       }
       await client.query(
         `UPDATE ${read}.replication_state
@@ -206,7 +226,15 @@ export async function applyReplicaBatch(cityCode, limit = REPLICA_BATCH_SIZE) {
     }
 
     await client.query("COMMIT");
-    return { applied: events.rowCount };
+    // Search reads the replica, so the replica is what the cache must track.
+    // Bumping here rather than (only) on the primary write is what keeps the
+    // cache from pinning a pre-applier answer for a further TTL: the invalidation
+    // now lands exactly when the read model changes. Bumping on the write as well
+    // is harmless and useful, since it clears entries that are already stale.
+    if (visibilityChanged) {
+      await invalidateCityInventory(cityCode);
+    }
+    return { applied: events.rowCount, visibilityChanged };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;
@@ -264,6 +292,16 @@ export function startBackgroundJobs(logger) {
   };
 }
 
+/**
+ * Drain the city pools the job runner used.
+ *
+ * The registry owns the pools, so they are read from it rather than from a
+ * module-local reference. This previously called `pool.end()` on an identifier
+ * that was never defined here, which would have thrown a ReferenceError during
+ * shutdown and skipped the remaining cleanup. Shutdown is the worst moment to
+ * discover that, so it is fixed rather than left for a redeploy to expose.
+ */
 export async function closeJobPool() {
-  await pool.end();
+  const closers = allCityPools().map((entry) => entry.pool);
+  await Promise.allSettled(closers.map((pool) => pool.end()));
 }

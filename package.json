@@ -30,6 +30,8 @@
     "test": "node --env-file-if-exists=.env ./scripts/test-all.js",
     "test:clean": "node --env-file-if-exists=.env ./scripts/test-all.js",
     "test:all": "node --env-file-if-exists=.env ./scripts/test-all.js",
+    "cache:rebuild": "node --env-file-if-exists=.env ./scripts/rebuild-presence.js",
+    "test:cache": "node --env-file-if-exists=.env ./scripts/run-test.js cache",
     "test:phase1": "node --env-file-if-exists=.env ./scripts/run-test.js phase1",
     "test:phase2": "node --env-file-if-exists=.env ./scripts/run-test.js phase2",
     "test:phase3": "node --env-file-if-exists=.env ./scripts/run-test.js phase3",

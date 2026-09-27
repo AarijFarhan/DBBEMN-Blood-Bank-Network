@@ -14,8 +14,15 @@ export function createTokenPair(user) {
     donor_id: user.donor_id ?? null,
     donor_city_code: user.donor_city_code ?? null,
   };
+  // Why the access token carries a jti: revocation is by identifier, not by
+  // token string. Without it, logout could only revoke the refresh token and the
+  // access token would stay valid for its full 15 minutes — a real window on a
+  // shared or stolen device. Tokens minted before this change have no jti; the
+  // auth middleware treats those as un-revocable rather than rejecting them.
+  const accessTokenId = randomUUID();
   const accessToken = jwt.sign(claims, env.jwtSecret, {
     subject: user.user_id,
+    jwtid: accessTokenId,
     issuer: "dbbemn",
     audience: "dbbemn-api",
     expiresIn: "15m",
@@ -28,5 +35,5 @@ export function createTokenPair(user) {
     audience: "dbbemn-refresh",
     expiresIn: "7d",
   });
-  return { accessToken, refreshToken, tokenId };
+  return { accessToken, refreshToken, tokenId, accessTokenId };
 }

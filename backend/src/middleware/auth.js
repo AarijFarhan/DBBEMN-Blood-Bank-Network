@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import { AppError, asyncRoute } from "./errors.js";
 import { env } from "../config/env.js";
 import { getCatalogPool } from "../db/registry.js";
+import { isAccessTokenRevoked } from "../cache/revocations.js";
 
 export const authenticate = asyncRoute(async (req, _res, next) => {
   const authorization = req.get("authorization");
@@ -23,6 +24,13 @@ export const authenticate = asyncRoute(async (req, _res, next) => {
     throw new AppError(401, "INVALID_ACCESS_TOKEN", "The access token is invalid.");
   }
 
+  // After signature verification, before the database round trip. A revoked token
+  // is rejected without touching catalog.users, so logout is immediate rather
+  // than "effective when this access token expires".
+  if (await isAccessTokenRevoked(claims.jti, claims.exp)) {
+    throw new AppError(401, "TOKEN_REVOKED", "This session has been signed out.");
+  }
+
   const user = await getCatalogPool().query(
     `SELECT user_id, username, email, role, hospital_id, blood_bank_id,
             donor_id, donor_city_code, is_active
@@ -35,6 +43,9 @@ export const authenticate = asyncRoute(async (req, _res, next) => {
     throw new AppError(401, "ACCOUNT_INACTIVE", "This account is inactive.");
   }
   req.user = row;
+  // Verified claims for handlers that need them — logout revokes by jti, and
+  // re-decoding the header would be redundant work on an already-verified token.
+  req.accessToken = claims;
   next();
 });
 

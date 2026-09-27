@@ -9,6 +9,7 @@ import { parseQuery } from "../middleware/validate.js";
 import { bloodGroupSchema, cityCodeSchema, uuidSchema } from "../utils/validators.js";
 import { getActiveBank, getActiveHospital } from "../services/catalog.js";
 import { assertCityWritable } from "../services/chaos.js";
+import { KIND, locateAcrossCities, rememberCreated } from "../services/presence.js";
 
 const router = Router();
 const donorIdSchema = uuidSchema;
@@ -22,7 +23,7 @@ const donorQuerySchema = z.object({
 const availabilitySchema = z.object({ isAvailable: z.boolean() });
 
 async function findDonor(donorId, cities) {
-  for (const cityCode of cities) {
+  return locateAcrossCities(KIND.DONOR, donorId, cities, async (cityCode) => {
     const { hist } = schemasFor(cityCode);
     const result = await getPoolForCity(cityCode).query(
       `SELECT donor_id AS "donorId", full_name AS "fullName", phone,
@@ -34,8 +35,8 @@ async function findDonor(donorId, cities) {
       [donorId],
     );
     if (result.rowCount > 0) return { donor: result.rows[0], cityCode };
-  }
-  return null;
+    return null;
+  });
 }
 
 router.get(

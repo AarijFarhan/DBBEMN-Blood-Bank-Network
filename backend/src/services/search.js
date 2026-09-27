@@ -4,6 +4,7 @@ import { getCatalogPool, getPoolForCity } from "../db/registry.js";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { AppError } from "../middleware/errors.js";
 import { getChaosFlags, measureReplicaLagMs } from "./chaos.js";
+import { buildKey, recall, remember } from "../cache/searchCache.js";
 
 const GROUPS = new Set(["A", "B", "AB", "O"]);
 const RH_FACTORS = new Set(["POS", "NEG"]);
@@ -531,6 +532,19 @@ function sourceForResponses(responses, flags, cities) {
   return "SIMULATED_REPLICA";
 }
 
+/**
+ * Cache key for one scatter-gather read.
+ *
+ * The cursor is folded in separately because it selects a different slice of the
+ * same sorted result set: page 2 and page 1 share a query fingerprint but are
+ * not interchangeable, and a version bump alone would not separate them.
+ */
+async function buildSearchCacheKey(namespace, fingerprint, cursor, cities) {
+  if (!env.cache.enabled) return null;
+  const identity = cursor ? `${fingerprint}|cursor=${cursor}` : fingerprint;
+  return buildKey(namespace, identity, cities);
+}
+
 function makeMeta(cities, responses, unavailableCities, flags, source) {
   return {
     shardsQueried: cities.length,
@@ -553,6 +567,16 @@ export async function searchUnits(input) {
   });
   const origin = await loadDistanceOrigin(query);
   const flags = await getChaosFlags();
+
+  // Version-stamped read-through. A hit is only served when it was built from a
+  // complete read against the current topology, so it cannot under-report stock
+  // or claim a replica read that no longer happens.
+  const cacheKey = await buildSearchCacheKey("search", fingerprint, query.cursor, query.cities);
+  const cached = cacheKey ? await recall(cacheKey, { cities: query.cities, flags }) : null;
+  if (cached) {
+    return { ...cached, cache: { status: "HIT" } };
+  }
+
   const scattered = await scatterGather(query.cities, flags, async (cityCode, source) =>
     sourceQueryForCity(cityCode, query, source, origin, cursor));
   const units = [];
@@ -580,7 +604,19 @@ export async function searchUnits(input) {
   const source = sourceForResponses(scattered.responses, flags, query.cities);
   const meta = makeMeta(query.cities, scattered.responses, scattered.unavailableCities, flags, source);
   meta.replicaLagMs = await collectLags(query.cities);
-  return { units: page, nextCursor, meta };
+  const result = { units: page, nextCursor, meta };
+
+  if (cacheKey) {
+    await remember(cacheKey, result, {
+      cities: query.cities,
+      flags,
+      // Any missing shard means this answer is a subset of reality. Caching it
+      // would keep hiding real stock after the shard recovered.
+      complete: scattered.unavailableCities.length === 0,
+      ttlSeconds: env.cache.searchTtlSeconds,
+    });
+  }
+  return { ...result, cache: { status: "MISS" } };
 }
 
 async function sourceQueryForCity(cityCode, query, source, origin, cursor) {
@@ -592,6 +628,15 @@ async function sourceQueryForCity(cityCode, query, source, origin, cursor) {
 export async function stockSummary(input) {
   const query = normalizeQuery({ ...input, sortBy: "expiryDate", order: "asc" });
   const flags = await getChaosFlags();
+
+  // Same rules as searchUnits: version-stamped, and only ever cached when the
+  // read was complete.
+  const cacheKey = await buildSearchCacheKey("summary", queryFingerprint(query), null, query.cities);
+  const cached = cacheKey ? await recall(cacheKey, { cities: query.cities, flags }) : null;
+  if (cached) {
+    return { ...cached, cache: { status: "HIT" } };
+  }
+
   const scattered = await scatterGather(query.cities, flags, async (cityCode, source) => {
     const statement = buildSummarySql(cityCode, source, query);
     const result = await getPoolForCity(cityCode).query(statement.text, statement.values);
@@ -618,5 +663,17 @@ export async function stockSummary(input) {
     cityCode,
     summary.filter((row) => row.cityCode === cityCode),
   ]));
-  return { summary, counts: summary, byCity, meta };
+  const result = { summary, counts: summary, byCity, meta };
+
+  if (cacheKey) {
+    await remember(cacheKey, result, {
+      cities: query.cities,
+      flags,
+      // A per-city count that silently omits a down shard is a lie a caller
+      // cannot detect, so it must never be served from cache.
+      complete: scattered.unavailableCities.length === 0,
+      ttlSeconds: env.cache.summaryTtlSeconds,
+    });
+  }
+  return { ...result, cache: { status: "MISS" } };
 }

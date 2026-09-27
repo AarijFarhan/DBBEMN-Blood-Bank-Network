@@ -8,6 +8,8 @@ import { AppError, asyncRoute } from "../middleware/errors.js";
 import { parseQuery } from "../middleware/validate.js";
 import { getActiveBank } from "../services/catalog.js";
 import { assertCityWritable } from "../services/chaos.js";
+import { invalidateCityInventory } from "../cache/store.js";
+import { KIND, locateAcrossCities } from "../services/presence.js";
 import { cityCodeSchema, uuidSchema } from "../utils/validators.js";
 
 const router = Router();
@@ -29,7 +31,7 @@ const unitsQuerySchema = z.object({
 const cityQuerySchema = z.object({ city: cityCodeSchema.optional() });
 
 async function readUnit(unitId, cities) {
-  for (const cityCode of cities) {
+  return locateAcrossCities(KIND.UNIT, unitId, cities, async (cityCode) => {
     const { hot } = schemasFor(cityCode);
     const result = await getPoolForCity(cityCode).query(
       `SELECT unit_id AS "unitId", donation_id AS "donationId",
@@ -42,8 +44,8 @@ async function readUnit(unitId, cities) {
       [unitId],
     );
     if (result.rowCount > 0) return { unit: result.rows[0], cityCode };
-  }
-  return null;
+    return null;
+  });
 }
 
 async function accessibleCities(req, requestedCity) {
@@ -123,6 +125,9 @@ router.patch(
     const query = parseQuery(cityQuerySchema, req.query);
     const cities = await accessibleCities(req, query.city);
 
+    // A discard is a write, so the shard is never skipped: presence narrowing
+    // only applies to reads. Write attempts stay exhaustive so a stale index can
+    // never hide a unit that an admin is trying to discard.
     for (const cityCode of cities) {
        const { hot } = schemasFor(cityCode);
        const changed = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
@@ -146,6 +151,9 @@ router.patch(
         return { ...update.rows[0], cityCode };
       });
       if (changed) {
+        // The unit left the searchable pool, so cached search and summary
+        // entries for this city are now wrong.
+        await invalidateCityInventory(cityCode);
         res.json({ unit: changed });
         return;
       }

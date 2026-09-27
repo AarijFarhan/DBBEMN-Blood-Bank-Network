@@ -10,6 +10,8 @@ import { AppError, asyncRoute } from "../middleware/errors.js";
 import { parseQuery, validate } from "../middleware/validate.js";
 import { getActiveBank } from "../services/catalog.js";
 import { assertCityWritable } from "../services/chaos.js";
+import { invalidateCityInventory } from "../cache/store.js";
+import { KIND, rememberCreated } from "../services/presence.js";
 import {
   cityCodeSchema,
   componentSchema,
@@ -135,6 +137,14 @@ router.post(
       return { donationId, cityCode, units };
     });
 
+    // New rows must enter the presence index, otherwise a trusted filter rebuilt
+    // earlier would not know about them. Best-effort by design: the failure mode
+    // is a full scan, never a missed record.
+    await rememberCreated(KIND.DONATION, cityCode, donationId);
+    for (const unit of created.units) {
+      await rememberCreated(KIND.UNIT, cityCode, unit.unitId);
+    }
+
     res.status(201).json({ donation: created });
   }),
 );
@@ -193,6 +203,12 @@ router.patch(
       return { donationId: donationId.data, screeningStatus, units: unitResult.rows };
     });
 
+    // Screening flips quarantined units to AVAILABLE or DISCARDED, which is
+    // exactly the transition that puts blood in or takes it out of search
+    // results. Invalidate only when a unit actually changed status.
+    if (result.units.length > 0) {
+      await invalidateCityInventory(cityCode);
+    }
     res.json({ donation: result });
   }),
 );

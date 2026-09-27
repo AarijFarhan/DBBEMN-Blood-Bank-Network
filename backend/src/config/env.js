@@ -100,4 +100,38 @@ export const env = Object.freeze({
   searchShardTimeoutMs: numberFromEnv("SEARCH_SHARD_TIMEOUT_MS", 1500, { min: 50, max: 30000 }),
   instanceId: process.env.INSTANCE_ID || randomUUID(),
   frontendDist: new URL("../../../frontend/dist/", import.meta.url),
+
+  // ── Cache / Bloom filter ────────────────────────────────────────────────
+  // Every value here is optional. With no REDIS_URL the process falls back to a
+  // bounded in-memory cache and the Bloom filters degrade to exact in-memory
+  // sets, so the app boots and behaves identically with no cache at all. See
+  // backend/src/cache/store.js for why the fallback is safe here and what it
+  // costs on a multi-instance deploy.
+  cache: Object.freeze({
+    redisUrl: (process.env.REDIS_URL ?? "").trim() || null,
+    keyPrefix: (process.env.CACHE_KEY_PREFIX ?? "").trim() || "dbbemn",
+    // Hard ceiling on any cached entry, independent of the per-entry TTL. This
+    // is the safety net for search results: if an inventory-version bump is ever
+    // missed, staleness is still bounded rather than unbounded.
+    searchMaxTtlSeconds: numberFromEnv("CACHE_SEARCH_MAX_TTL", 15, { min: 1, max: 300 }),
+    searchTtlSeconds: numberFromEnv("CACHE_SEARCH_TTL", 10, { min: 1, max: 300 }),
+    summaryTtlSeconds: numberFromEnv("CACHE_SUMMARY_TTL", 20, { min: 1, max: 600 }),
+    directoryTtlSeconds: numberFromEnv("CACHE_DIRECTORY_TTL", 60, { min: 1, max: 3600 }),
+    memoryMaxEntries: numberFromEnv("CACHE_MEMORY_MAX_ENTRIES", 5000, { min: 16, max: 1_000_000 }),
+    enabled: (process.env.CACHE_ENABLED ?? "true").trim().toLowerCase() !== "false",
+  }),
+  bloom: Object.freeze({
+    enabled: (process.env.BLOOM_ENABLED ?? "true").trim().toLowerCase() !== "false",
+    // Sizing only affects the false-positive rate. Overloading a filter makes
+    // lookups slower (more false hits), never incorrect: Bloom filters have no
+    // false negatives, so an undersized filter can only cost queries, not answers.
+    expectedItems: numberFromEnv("BLOOM_EXPECTED_ITEMS", 50_000, { min: 100, max: 10_000_000 }),
+    errorRate: (() => {
+      const value = Number(process.env.BLOOM_ERROR_RATE ?? 0.001);
+      if (!Number.isFinite(value) || value <= 0 || value >= 0.1) {
+        throw new Error("BLOOM_ERROR_RATE must be a number greater than 0 and less than 0.1.");
+      }
+      return value;
+    })(),
+  }),
 });

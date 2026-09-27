@@ -11,6 +11,8 @@ import { validate } from "../middleware/validate.js";
 import { schemasFor } from "../db/shard-router.js";
 import { assertCityWritable } from "../services/chaos.js";
 import { createTokenPair, hashRefreshToken } from "../utils/tokens.js";
+import { revokeAccessToken } from "../cache/revocations.js";
+import { KIND, rememberCreated } from "../services/presence.js";
 import { loginSchema, refreshSchema, registerDonorSchema } from "../utils/validators.js";
 
 const router = Router();
@@ -67,6 +69,11 @@ router.post(
         ],
       );
     });
+
+    // Index the new donor so cross-shard donor lookups can skip this city's
+    // shard. After the commit, because a filter entry for a row that does not
+    // exist yet would be the wrong way round.
+    await rememberCreated(KIND.DONOR, body.cityCode, donorId);
 
     let user;
     try {
@@ -231,6 +238,9 @@ router.post(
        WHERE token_id = $1 AND user_id = $2 AND token_hash = $3`,
       [claims.jti, req.user.user_id, hashRefreshToken(req.body.refreshToken)],
     );
+    // Revoking the refresh token alone leaves the access token usable until it
+    // expires. Blacklisting its jti closes that window immediately.
+    await revokeAccessToken(req.accessToken?.jti, req.accessToken?.exp);
     res.status(204).end();
   }),
 );

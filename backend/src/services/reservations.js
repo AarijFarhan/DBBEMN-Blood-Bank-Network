@@ -5,6 +5,8 @@ import { withSerializableRetryFor } from "../db/pool.js";
 import { getPoolForCity } from "../db/registry.js";
 import { AppError } from "../middleware/errors.js";
 import { assertCityWritable } from "./chaos.js";
+import { invalidateCityInventory } from "../cache/store.js";
+import { KIND, rememberCreated } from "./presence.js";
 
 export { assertCityWritable };
 
@@ -97,7 +99,7 @@ async function createReservation(client, hot, request, cityCode, unit) {
 export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request);
-  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const cached = await claimRequest(client, hot, request, requestHash);
     if (cached) return cached;
@@ -148,12 +150,25 @@ export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
     }
     throw error;
   });
+
+  // Units just moved to RESERVED, so any cached search or summary that still
+  // lists them as available is now showing stock that is spoken for. Bump only
+  // after the commit succeeded.
+  if (result.reservations.length > 0) {
+    await invalidateCityInventory(cityCode);
+    // Index the new reservations so detail lookups can skip other shards.
+    // Best-effort: a failure here untrusts the filter rather than lying.
+    for (const reservation of result.reservations) {
+      await rememberCreated(KIND.RESERVATION, cityCode, reservation.reservationId);
+    }
+  }
+  return result;
 }
 
 export async function reserveSpecificUnit(cityCode, request, unitId) {
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request, unitId);
-  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const cached = await claimRequest(client, hot, request, requestHash);
     if (cached) return cached;
@@ -207,13 +222,21 @@ export async function reserveSpecificUnit(cityCode, request, unitId) {
     }
     throw error;
   });
+
+  if (result.reservations.length > 0) {
+    await invalidateCityInventory(cityCode);
+    for (const reservation of result.reservations) {
+      await rememberCreated(KIND.RESERVATION, cityCode, reservation.reservationId);
+    }
+  }
+  return result;
 }
 
 export async function compensateCityReservations(cityCode, request, reservations) {
   if (reservations.length === 0) return { cityCode, compensated: 0 };
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request);
-  return withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     let compensated = 0;
     for (const reservation of reservations) {
@@ -278,4 +301,11 @@ export async function compensateCityReservations(cityCode, request, reservations
     }
     return { cityCode, compensated };
   });
+
+  // Compensation releases units back to AVAILABLE/EXPIRED, so it invalidates
+  // just as a reservation does.
+  if (result.compensated > 0) {
+    await invalidateCityInventory(cityCode);
+  }
+  return result;
 }
