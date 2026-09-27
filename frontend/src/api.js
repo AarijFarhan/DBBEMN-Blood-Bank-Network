@@ -1,4 +1,11 @@
-const API_ROOT = "/api/v1";
+const RENDER_API_ORIGIN = "https://dbbemn-blood-bank-network.onrender.com";
+const API_PREFIX = "/api/v1";
+
+const configuredApiUrl = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
+const API_ROOT = configuredApiUrl.endsWith(API_PREFIX)
+  ? configuredApiUrl
+  : `${configuredApiUrl || RENDER_API_ORIGIN}${API_PREFIX}`;
+
 const SESSION_KEY = "dbbemn.session";
 const listeners = new Set();
 let session = readSession();
