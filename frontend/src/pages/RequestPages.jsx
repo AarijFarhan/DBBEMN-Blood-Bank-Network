@@ -5,6 +5,18 @@ import { useRequest } from "../hooks/useRequest";
 import { BLOOD_GROUPS, CITIES, DONOR_REQUEST_STATUSES, RH_FACTORS, URGENCIES } from "../constants";
 import { Button, EmptyState, ErrorState, Field, LoadingState, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
 import { errorDetails, formatBloodType, formatDateTime, friendlyError, listFrom } from "../utils";
+import { hasErrors, maxLength, number, oneOf, required, uuid, validate, useFieldErrors } from "../validation";
+
+const CALLOUT_RULES = {
+  donorId: [required("Selected donor"), uuid("Selected donor")],
+  cityCode: [required("Donor city shard"), oneOf(CITIES.map((city) => city.cityCode), "Donor city shard")],
+  requiredBloodGroup: [required("Required blood group"), oneOf(BLOOD_GROUPS, "Required blood group")],
+  requiredRh: [required("Required Rh"), oneOf(RH_FACTORS, "Required Rh")],
+  urgency: [required("Urgency"), oneOf(URGENCIES.map((item) => item.value), "Urgency")],
+  slotsRequested: [required("Slots"), number({ min: 1, max: 10, integer: true, label: "Slots" })],
+  patientRef: [maxLength(120, "Patient reference")],
+  notes: [maxLength(1000, "Message to the donor")],
+};
 
 function UrgencyBadge({ urgency }) {
   const tone = urgency === "CRITICAL" ? "danger" : urgency === "URGENT" ? "warning" : "neutral";
@@ -40,6 +52,7 @@ export function SendDonorRequestsPage() {
   });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const [statusFilter, setStatusFilter] = useState("");
+  const { errors, setErrors, clearError, clearAll } = useFieldErrors();
 
   const donors = useRequest(
     () => api.search.donors({ ...filters, limit: 50 }),
@@ -68,6 +81,7 @@ export function SendDonorRequestsPage() {
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+    clearError(name);
   }
 
   function pickDonor(donor) {
@@ -78,11 +92,15 @@ export function SendDonorRequestsPage() {
       requiredBloodGroup: donor.bloodGroup,
       requiredRh: donor.rhFactor,
     }));
+    clearAll();
     setAction({ loading: false, error: null, success: `Selected ${donor.fullName} (${formatBloodType(donor.bloodGroup, donor.rhFactor)}). Fill the details and send.` });
   }
 
   async function submit(event) {
     event.preventDefault();
+    const nextErrors = validate(form, CALLOUT_RULES);
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     try {
       const created = await api.donorRequests.create({
@@ -97,6 +115,7 @@ export function SendDonorRequestsPage() {
       });
       setAction({ loading: false, error: null, success: `Call-out sent to ${created.donor.fullName}. They can accept or decline from their donor portal.` });
       setForm({ donorId: "", cityCode: "", requiredBloodGroup: "", requiredRh: "POS", urgency: "ROUTINE", slotsRequested: 1, patientRef: "", notes: "" });
+      clearAll();
       requests.reload();
     } catch (error) {
       setAction({ loading: false, error, success: null });
@@ -178,40 +197,40 @@ export function SendDonorRequestsPage() {
       </SectionCard>
 
       <SectionCard title="Step 2 · Send the call-out" description="The requested blood type must be one the selected donor can actually give.">
-        <form className="stack-form" onSubmit={submit}>
+        <form className="stack-form" noValidate onSubmit={submit}>
           <div className="form-grid form-grid-two">
-            <Field label="Selected donor" hint={form.donorId ? undefined : "Pick a donor above"}>
-              <input required readOnly value={form.donorId} placeholder="No donor selected" className="mono-text" />
+            <Field label="Selected donor" hint={form.donorId ? undefined : "Pick a donor above"} error={errors.donorId}>
+              <input readOnly value={form.donorId} placeholder="No donor selected" className="mono-text" />
             </Field>
-            <Field label="Donor city shard">
-              <input required readOnly value={form.cityCode} placeholder="Set when you select a donor" className="mono-text" />
+            <Field label="Donor city shard" error={errors.cityCode}>
+              <input readOnly value={form.cityCode} placeholder="Set when you select a donor" className="mono-text" />
             </Field>
           </div>
           <div className="form-grid form-grid-four">
-            <Field label="Required blood group" hint="Required">
-              <select required value={form.requiredBloodGroup} onChange={(event) => update("requiredBloodGroup", event.target.value)}>
+            <Field label="Required blood group" hint="Required" error={errors.requiredBloodGroup}>
+              <select value={form.requiredBloodGroup} onChange={(event) => update("requiredBloodGroup", event.target.value)}>
                 <option value="">Select</option>
                 {BLOOD_GROUPS.map((group) => <option key={group} value={group}>{group}</option>)}
               </select>
             </Field>
-            <Field label="Required Rh" hint="Required">
-              <select required value={form.requiredRh} onChange={(event) => update("requiredRh", event.target.value)}>
+            <Field label="Required Rh" hint="Required" error={errors.requiredRh}>
+              <select value={form.requiredRh} onChange={(event) => update("requiredRh", event.target.value)}>
                 {RH_FACTORS.map((factor) => <option key={factor} value={factor}>{factor === "POS" ? "Positive" : "Negative"}</option>)}
               </select>
             </Field>
-            <Field label="Urgency">
+            <Field label="Urgency" error={errors.urgency}>
               <select value={form.urgency} onChange={(event) => update("urgency", event.target.value)}>
                 {URGENCIES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </Field>
-            <Field label="Slots" hint="1 to 10">
+            <Field label="Slots" hint="1 to 10" error={errors.slotsRequested}>
               <input type="number" min={1} max={10} value={form.slotsRequested} onChange={(event) => update("slotsRequested", event.target.value)} />
             </Field>
           </div>
-          <Field label="Patient reference" hint="Optional, internal only">
+          <Field label="Patient reference" hint="Optional, internal only" error={errors.patientRef}>
             <input value={form.patientRef} onChange={(event) => update("patientRef", event.target.value)} placeholder="e.g. Bed 12, ICU-3" />
           </Field>
-          <Field label="Message to the donor" hint="Optional">
+          <Field label="Message to the donor" hint="Optional" error={errors.notes}>
             <textarea rows={3} value={form.notes} onChange={(event) => update("notes", event.target.value)} placeholder="Explain where and when to come in." />
           </Field>
           {form.requiredBloodGroup ? <span className="field-hint">{compatibleCount} of the listed donors can donate to this exact type.</span> : null}
@@ -283,11 +302,16 @@ export function MyDonorRequestsPage() {
   const byStatus = requests.data?.byStatus || {};
 
   async function respond(requestId, response) {
+    const note = notes[requestId]?.trim() || "";
+    if (note.length > 500) {
+      setAction({ loadingId: null, error: new Error("Reply note must be at most 500 characters."), success: null });
+      return;
+    }
     setAction({ loadingId: requestId, error: null, success: null });
     try {
       await api.donorRequests.respond(requestId, {
         response,
-        responseNotes: notes[requestId]?.trim() || undefined,
+        responseNotes: note || undefined,
       });
       setAction({
         loadingId: null,
@@ -344,7 +368,7 @@ export function MyDonorRequestsPage() {
                   </dl>
                   {request.notes ? <p className="callout-note">{request.notes}</p> : null}
                   <Field label="Reply note" hint="Optional">
-                    <input value={notes[request.requestId] || ""} onChange={(event) => setNotes((current) => ({ ...current, [request.requestId]: event.target.value }))} placeholder="e.g. I can come in tomorrow morning" />
+                    <input maxLength={500} value={notes[request.requestId] || ""} onChange={(event) => setNotes((current) => ({ ...current, [request.requestId]: event.target.value }))} placeholder="e.g. I can come in tomorrow morning" />
                   </Field>
                   <div className="button-pair">
                     <Button onClick={() => respond(request.requestId, "ACCEPTED")} disabled={action.loadingId === request.requestId}>{action.loadingId === request.requestId ? "Sending…" : "Accept"}</Button>

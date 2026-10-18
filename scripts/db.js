@@ -80,7 +80,7 @@ export function scriptDatabaseMode() {
   const raw = (process.env.DB_MODE ?? "").trim().toLowerCase();
   if (raw === "single" || raw === "distributed") return raw;
   if (raw) throw new Error('DB_MODE must be either "single" or "distributed".');
-  const perCity = ["KHI_DATABASE_URL", "LHE_DATABASE_URL", "ISB_DATABASE_URL"].filter(
+  const perCity = CITY_CODES.map((cityCode) => `${cityCode}_DATABASE_URL`).filter(
     (name) => process.env[name],
   );
   return perCity.length > 0 ? "distributed" : "single";
@@ -138,9 +138,7 @@ export function allScriptPools() {
 
   const missing = [
     ["CATALOG_DATABASE_URL", process.env.CATALOG_DATABASE_URL],
-    ["KHI_DATABASE_URL", process.env.KHI_DATABASE_URL],
-    ["LHE_DATABASE_URL", process.env.LHE_DATABASE_URL],
-    ["ISB_DATABASE_URL", process.env.ISB_DATABASE_URL],
+    ...CITY_CODES.map((cityCode) => [`${cityCode}_DATABASE_URL`, process.env[`${cityCode}_DATABASE_URL`]]),
   ]
     .filter(([, value]) => !value)
     .map(([name]) => name);
@@ -150,9 +148,9 @@ export function allScriptPools() {
 
   const urls = {
     catalog: process.env.CATALOG_DATABASE_URL,
-    KHI: process.env.KHI_DATABASE_URL,
-    LHE: process.env.LHE_DATABASE_URL,
-    ISB: process.env.ISB_DATABASE_URL,
+    ...Object.fromEntries(
+      CITY_CODES.map((cityCode) => [cityCode, process.env[`${cityCode}_DATABASE_URL`]]),
+    ),
   };
   cachedPools = Object.entries(urls).map(([label, url]) => ({
     label,

@@ -1,44 +1,46 @@
 import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { ROLE_LABELS, ROLE_SHORT_LABELS, roleHome } from "../constants";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { ROLE_LABELS, ROLE_SHORT_LABELS } from "../constants";
 import { useAuth } from "../auth";
 import { displayUserName } from "../utils";
-import { Button, RoleBadge, UserAvatar } from "./UI";
+import { Button, Icon, RoleBadge, UserAvatar } from "./UI";
 
 const navigation = {
   HOSPITAL_ADMIN: [
-    { to: "/app/hospital/search", label: "Find blood", detail: "Search & reserve" },
-    { to: "/app/hospital/reservations", label: "Reservations", detail: "Track requests" },
-    { to: "/app/hospital/donor-requests", label: "Donor call-outs", detail: "Ask a donor" },
+    { to: "/app/hospital/search", label: "Find blood", detail: "Search & reserve", icon: "search" },
+    { to: "/app/hospital/reservations", label: "Reservations", detail: "Track requests", icon: "calendar" },
+    { to: "/app/hospital/donor-requests", label: "Donor call-outs", detail: "Ask a donor", icon: "megaphone" },
   ],
   BLOODBANK_ADMIN: [
-    { to: "/app/bank/inventory", label: "Inventory", detail: "Units & expiry" },
-    { to: "/app/bank/donations", label: "Donations", detail: "Record collection" },
-    { to: "/app/bank/donor-requests", label: "Donor call-outs", detail: "Ask a donor" },
-    { to: "/app/bank/screening", label: "Screening", detail: "Pending checks" },
-    { to: "/app/bank/dispatch", label: "Dispatch", detail: "Release units" },
-    { to: "/app/bank/discard", label: "Discard", detail: "Quarantine control" },
+    { to: "/app/bank/inventory", label: "Inventory", detail: "Units & expiry", icon: "boxes" },
+    { to: "/app/bank/donations", label: "Donations", detail: "Record collection", icon: "droplet" },
+    { to: "/app/bank/donor-requests", label: "Donor call-outs", detail: "Ask a donor", icon: "megaphone" },
+    { to: "/app/bank/screening", label: "Screening", detail: "Pending checks", icon: "beaker" },
+    { to: "/app/bank/dispatch", label: "Dispatch", detail: "Release units", icon: "truck" },
+    { to: "/app/bank/discard", label: "Discard", detail: "Quarantine control", icon: "trash" },
   ],
   DONOR: [
-    { to: "/app/donor/profile", label: "My profile", detail: "Eligibility" },
-    { to: "/app/donor/requests", label: "Blood requests", detail: "Accept or decline" },
-    { to: "/app/donor/donations", label: "Donation history", detail: "Past collections" },
+    { to: "/app/donor/profile", label: "My profile", detail: "Eligibility", icon: "user" },
+    { to: "/app/donor/requests", label: "Blood requests", detail: "Accept or decline", icon: "inbox" },
+    { to: "/app/donor/donations", label: "Donation history", detail: "Past collections", icon: "history" },
   ],
   SYSTEM_ADMIN: [
-    { to: "/app/system/health", label: "Health", detail: "Service checks" },
-    { to: "/app/system/chaos", label: "Chaos controls", detail: "Failure switches" },
-    { to: "/app/system/cluster", label: "Cluster status", detail: "Shard telemetry" },
-    { to: "/app/system/donors", label: "Donor directory", detail: "Availability by city" },
-    { to: "/app/system/hospitals", label: "Hospitals & banks", detail: "Register facilities" },
-    { to: "/app/system/users", label: "Users", detail: "Accounts and access" },
+    { to: "/app/system/health", label: "Health", detail: "Service checks", icon: "activity" },
+    { to: "/app/system/chaos", label: "Chaos controls", detail: "Failure switches", icon: "sliders" },
+    { to: "/app/system/cluster", label: "Cluster status", detail: "Shard telemetry", icon: "server" },
+    { to: "/app/system/donors", label: "Donor directory", detail: "Availability by city", icon: "users" },
+    { to: "/app/system/hospitals", label: "Hospitals & banks", detail: "Register facilities", icon: "hospital" },
+    { to: "/app/system/users", label: "Users", detail: "Accounts and access", icon: "shield" },
   ],
 };
 
 export default function AppShell() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const items = navigation[user?.role] || [];
+  const current = items.find((item) => location.pathname.startsWith(item.to));
 
   async function handleLogout() {
     await logout();
@@ -49,7 +51,7 @@ export default function AppShell() {
     <div className="app-shell">
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="brand-lockup">
-          <span className="brand-mark">D</span>
+          <span className="brand-mark"><Icon name="droplet" size={20} /></span>
           <div>
             <strong>DBBEMN</strong>
             <span>Blood bank network</span>
@@ -68,7 +70,7 @@ export default function AppShell() {
               className={({ isActive }) => `nav-item ${isActive ? "nav-item-active" : ""}`}
               onClick={() => setMenuOpen(false)}
             >
-              <span className="nav-item-mark" aria-hidden="true" />
+              <span className="nav-item-mark" aria-hidden="true"><Icon name={item.icon} size={17} /></span>
               <span>
                 <strong>{item.label}</strong>
                 <small>{item.detail}</small>
@@ -84,16 +86,23 @@ export default function AppShell() {
               <span>{ROLE_SHORT_LABELS[user?.role] || "Workspace"}</span>
             </div>
           </div>
-          <Button variant="ghost" size="sm" onClick={handleLogout}>Sign out</Button>
+          <Button variant="ghost" size="sm" onClick={handleLogout}>
+            <Icon name="logout" size={16} />
+            Sign out
+          </Button>
         </div>
       </aside>
       {menuOpen ? <button type="button" className="sidebar-overlay" aria-label="Close navigation" onClick={() => setMenuOpen(false)} /> : null}
       <div className="main-column">
         <header className="topbar">
-          <button type="button" className="mobile-menu-button" aria-label="Open navigation" onClick={() => setMenuOpen(true)}>☰</button>
+          <button type="button" className="mobile-menu-button" aria-label="Open navigation" onClick={() => setMenuOpen(true)}>
+            <Icon name="menu" size={18} />
+          </button>
           <div className="topbar-context">
             <span className="topbar-dot" />
-            <span>Secure workspace</span>
+            <strong>{current?.label || "Workspace"}</strong>
+            <span className="topbar-divider" />
+            <span className="topbar-subtle">Secure workspace</span>
             <span className="topbar-divider" />
             <code>/api/v1</code>
           </div>

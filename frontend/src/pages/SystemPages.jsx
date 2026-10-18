@@ -4,6 +4,24 @@ import { api } from "../api";
 import { BLOOD_GROUPS, CITIES, RH_FACTORS } from "../constants";
 import { AvailabilityBadge, Button, Checkbox, ConfirmDeleteModal, EmptyState, ErrorState, Field, LoadingState, Notice, PageHeader, PartialResults, RoleBadge, SectionCard, SimulatedBadge, StatusBadge } from "../components/UI";
 import { ageFromDate, errorDetails, formatBloodType, formatDate, formatDateTime, formatNumber, friendlyError, listFrom } from "../utils";
+import { email as emailRule, hasErrors, maxLength, minLength, number, oneOf, password as passwordRule, phone as phoneRule, required, username as usernameRule, validate, useFieldErrors } from "../validation";
+
+const FACILITY_RULES = {
+  cityCode: [required("City shard"), oneOf(CITIES.map((city) => city.cityCode), "City shard")],
+  name: [required("Name"), minLength(2, "Name"), maxLength(160, "Name")],
+  address: [maxLength(500, "Address")],
+  phone: [phoneRule("Phone")],
+  latitude: [number({ min: -90, max: 90, label: "Latitude" })],
+  longitude: [number({ min: -180, max: 180, label: "Longitude" })],
+};
+
+const USER_RULES = {
+  username: [required("Username"), usernameRule("Username"), maxLength(50, "Username")],
+  email: [required("Email"), emailRule],
+  password: [required("Password"), passwordRule("Password")],
+};
+
+const LAG_RULES = { lag: [required("Replica lag"), number({ min: 0, max: 60000, integer: true, label: "Replica lag" })] };
 
 function cityEntries(cities) {
   if (!cities) return [];
@@ -41,9 +59,17 @@ export function ChaosPage() {
   const [city, setCity] = useState("KHI");
   const [lag, setLag] = useState("1500");
   const [action, setAction] = useState({ loading: null, error: null, success: null });
+  const { errors, setErrors, clearError } = useFieldErrors();
   const cities = cityEntries(request.data?.cities);
   const selected = cities.find((item) => item.code === city);
   const flags = selected || {};
+
+  function applyLag() {
+    const nextErrors = validate({ lag }, LAG_RULES);
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
+    run("lag", { ms: Number(lag) });
+  }
 
   async function run(actionName, body) {
     setAction({ loading: actionName, error: null, success: null });
@@ -62,7 +88,7 @@ export function ChaosPage() {
       <PageHeader eyebrow="System workspace" title="Chaos controls" description="Exercise the failure paths of the distributed network. These switches do not stop real database nodes." actions={<SimulatedBadge label="SIMULATED FAILURE" />} />
       <Notice tone="warning" title="Simulation boundary">Replica and primary controls change router behavior for the demonstration environment. Do not use them as a substitute for production health management.</Notice>
       {action.success ? <Notice tone="success" title="Control updated">{action.success}</Notice> : null}{action.error ? <Notice tone="error" title="Control could not be changed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
-      <div className="workspace-grid workspace-grid-wide"><SectionCard title="Select a city shard" description="Flags are shared across API instances and should settle within one second."><div className="city-switcher">{cities.length ? cities.map((item) => <button type="button" key={item.code} className={`city-switch ${city === item.code ? "city-switch-active" : ""}`} onClick={() => setCity(item.code)}><strong>{item.code}</strong><span>{item.primary_up === false || item.replica_up === false ? "Attention" : "Healthy"}</span></button>) : CITIES.map((item) => <button type="button" key={item.cityCode} className={`city-switch ${city === item.cityCode ? "city-switch-active" : ""}`} onClick={() => setCity(item.cityCode)}><strong>{item.cityCode}</strong><span>{item.name}</span></button>)}</div></SectionCard><SectionCard title={`${city} controls`} description="Changes are recorded by the system control plane."><div className="chaos-actions"><div className="chaos-action-row"><div><strong>Primary shard</strong><span>{flags.primary_up === false ? "Writes unavailable" : "Writable"}</span></div><div className="button-pair"><Button variant={flags.primary_up === false ? "primary" : "danger"} size="sm" onClick={() => run(flags.primary_up === false ? "primary-up" : "primary-down")} disabled={Boolean(action.loading)}>{flags.primary_up === false ? "Bring primary up" : "Take primary down"}</Button></div></div><div className="chaos-action-row"><div><strong>Replica read model</strong><span>{flags.replica_up === false ? "Read model unavailable" : "Read model serving"}</span></div><Button variant={flags.replica_up === false ? "primary" : "secondary"} size="sm" onClick={() => run(flags.replica_up === false ? "replica-up" : "replica-down")} disabled={Boolean(action.loading)}>{flags.replica_up === false ? "Bring replica up" : "Take replica down"}</Button></div><div className="chaos-action-row lag-row"><div><strong>Artificial replica lag</strong><span>{formatNumber(flags.extra_lag_ms)} ms configured</span></div><div className="lag-control"><input type="number" min="0" max="60000" step="100" value={lag} onChange={(event) => setLag(event.target.value)} /><Button size="sm" onClick={() => run("lag", { ms: Number(lag) })} disabled={Boolean(action.loading)}>{action.loading === "lag" ? "Saving…" : "Apply lag"}</Button></div></div></div></SectionCard></div>
+      <div className="workspace-grid workspace-grid-wide"><SectionCard title="Select a city shard" description="Flags are shared across API instances and should settle within one second."><div className="city-switcher">{cities.length ? cities.map((item) => <button type="button" key={item.code} className={`city-switch ${city === item.code ? "city-switch-active" : ""}`} onClick={() => setCity(item.code)}><strong>{item.code}</strong><span>{item.primary_up === false || item.replica_up === false ? "Attention" : "Healthy"}</span></button>) : CITIES.map((item) => <button type="button" key={item.cityCode} className={`city-switch ${city === item.cityCode ? "city-switch-active" : ""}`} onClick={() => setCity(item.cityCode)}><strong>{item.cityCode}</strong><span>{item.name}</span></button>)}</div></SectionCard><SectionCard title={`${city} controls`} description="Changes are recorded by the system control plane."><div className="chaos-actions"><div className="chaos-action-row"><div><strong>Primary shard</strong><span>{flags.primary_up === false ? "Writes unavailable" : "Writable"}</span></div><div className="button-pair"><Button variant={flags.primary_up === false ? "primary" : "danger"} size="sm" onClick={() => run(flags.primary_up === false ? "primary-up" : "primary-down")} disabled={Boolean(action.loading)}>{flags.primary_up === false ? "Bring primary up" : "Take primary down"}</Button></div></div><div className="chaos-action-row"><div><strong>Replica read model</strong><span>{flags.replica_up === false ? "Read model unavailable" : "Read model serving"}</span></div><Button variant={flags.replica_up === false ? "primary" : "secondary"} size="sm" onClick={() => run(flags.replica_up === false ? "replica-up" : "replica-down")} disabled={Boolean(action.loading)}>{flags.replica_up === false ? "Bring replica up" : "Take replica down"}</Button></div><div className="chaos-action-row lag-row"><div><strong>Artificial replica lag</strong><span>{formatNumber(flags.extra_lag_ms)} ms configured</span></div><div className="lag-control"><input type="number" min="0" max="60000" step="100" value={lag} onChange={(event) => { setLag(event.target.value); clearError("lag"); }} /><Button size="sm" onClick={applyLag} disabled={Boolean(action.loading)}>{action.loading === "lag" ? "Saving…" : "Apply lag"}</Button></div>{errors.lag ? <span className="field-error">{errors.lag}</span> : null}</div></div></SectionCard></div>
       {request.loading ? <SectionCard><LoadingState label="Loading chaos state" /></SectionCard> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}
     </div>
   );
@@ -138,9 +164,10 @@ export function DonorDirectoryPage() {
               {RH_FACTORS.map((factor) => <option key={factor} value={factor}>{factor === "POS" ? "Positive" : "Negative"}</option>)}
             </select>
           </Field>
-          <Field label="Availability">
+          <div className="field">
+            <span className="field-label">Availability</span>
             <Checkbox label="Only donors currently available" checked={availableOnly} onChange={(event) => setAvailableOnly(event.target.checked)} />
-          </Field>
+          </div>
         </div>
       </SectionCard>
       {request.loading ? <SectionCard><LoadingState label="Loading donor directory" /></SectionCard> : null}
@@ -176,6 +203,7 @@ export function HospitalsBanksPage() {
   const [entity, setEntity] = useState("hospital");
   const [form, setForm] = useState({ name: "", address: "", phone: "", latitude: "", longitude: "" });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
+  const { errors, setErrors, clearError } = useFieldErrors();
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -211,10 +239,14 @@ export function HospitalsBanksPage() {
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+    clearError(name);
   }
 
   async function submit(event) {
     event.preventDefault();
+    const nextErrors = validate({ ...form, cityCode: city }, FACILITY_RULES);
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     const body = {
       name: form.name,
@@ -249,7 +281,7 @@ export function HospitalsBanksPage() {
       />
       <div className="workspace-grid workspace-grid-wide">
         <SectionCard title="Register a facility" description="City is required. Address and coordinates are optional but improve distance sorting.">
-          <form className="stack-form" onSubmit={submit}>
+          <form className="stack-form" noValidate onSubmit={submit}>
             <div className="form-grid form-grid-two">
               <Field label="Facility type">
                 <select value={entity} onChange={(event) => setEntity(event.target.value)}>
@@ -257,19 +289,19 @@ export function HospitalsBanksPage() {
                   <option value="bloodBank">Blood bank</option>
                 </select>
               </Field>
-              <Field label="City shard" hint="Required">
-                <select required value={city} onChange={(event) => setCity(event.target.value)}>
+              <Field label="City shard" hint="Required" error={errors.cityCode}>
+                <select value={city} onChange={(event) => { setCity(event.target.value); clearError("cityCode"); }}>
                   <option value="">Select a city</option>
                   {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
                 </select>
               </Field>
             </div>
-            <Field label="Name" hint="Required"><input required value={form.name} onChange={(event) => update("name", event.target.value)} placeholder="e.g. Lahore General Hospital" /></Field>
-            <Field label="Address"><input value={form.address} onChange={(event) => update("address", event.target.value)} placeholder="Street address" /></Field>
-            <Field label="Phone"><input value={form.phone} onChange={(event) => update("phone", event.target.value)} placeholder="+92-000-0000000" /></Field>
+            <Field label="Name" hint="Required" error={errors.name}><input value={form.name} onChange={(event) => update("name", event.target.value)} placeholder="e.g. Lahore General Hospital" /></Field>
+            <Field label="Address" error={errors.address}><input value={form.address} onChange={(event) => update("address", event.target.value)} placeholder="Street address" /></Field>
+            <Field label="Phone" error={errors.phone}><input value={form.phone} onChange={(event) => update("phone", event.target.value)} placeholder="+92-000-0000000" /></Field>
             <div className="form-grid form-grid-two">
-              <Field label="Latitude"><input type="number" step="any" value={form.latitude} onChange={(event) => update("latitude", event.target.value)} placeholder="31.520400" /></Field>
-              <Field label="Longitude"><input type="number" step="any" value={form.longitude} onChange={(event) => update("longitude", event.target.value)} placeholder="74.358700" /></Field>
+              <Field label="Latitude" error={errors.latitude}><input type="number" step="any" value={form.latitude} onChange={(event) => update("latitude", event.target.value)} placeholder="31.520400" /></Field>
+              <Field label="Longitude" error={errors.longitude}><input type="number" step="any" value={form.longitude} onChange={(event) => update("longitude", event.target.value)} placeholder="74.358700" /></Field>
             </div>
             <Button type="submit" disabled={action.loading || !city}>{action.loading ? "Creating…" : `Create ${entity === "hospital" ? "hospital" : "blood bank"}`}</Button>
             {!city ? <span className="field-hint">Select a city shard to enable creation.</span> : null}
@@ -320,6 +352,7 @@ const USER_ROLE_OPTIONS = [
 export function UsersPage() {
   const [form, setForm] = useState({ username: "", email: "", password: "", role: "HOSPITAL_ADMIN", facilityId: "", donorCity: "" });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
+  const { errors, setErrors, clearError } = useFieldErrors();
   const users = useRequest(() => api.system.listUsers(), []);
   const hospitals = useRequest(() => api.catalog.hospitals(), []);
   const banks = useRequest(() => api.catalog.bloodBanks(), []);
@@ -330,10 +363,18 @@ export function UsersPage() {
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+    clearError(name);
   }
 
   async function submit(event) {
     event.preventDefault();
+    const nextErrors = validate(form, USER_RULES);
+    if (form.role === "HOSPITAL_ADMIN" && !form.facilityId) nextErrors.facilityId = "Hospital is required.";
+    if (form.role === "BLOODBANK_ADMIN" && !form.facilityId) nextErrors.facilityId = "Blood bank is required.";
+    if (form.role === "DONOR" && !form.facilityId) nextErrors.facilityId = "Donor ID is required.";
+    if (form.role === "DONOR" && !form.donorCity) nextErrors.donorCity = "Donor city shard is required.";
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     const body = { username: form.username, email: form.email, password: form.password, role: form.role };
     if (form.role === "HOSPITAL_ADMIN") body.hospitalId = form.facilityId;
@@ -365,32 +406,32 @@ export function UsersPage() {
         actions={<Button variant="secondary" onClick={users.reload} disabled={users.loading}>Refresh list</Button>}
       />
       <SectionCard title="Create an account" description="The account can sign in straight after creation. Donor accounts need a donor profile that already exists in the chosen city shard.">
-        <form className="stack-form" onSubmit={submit}>
+        <form className="stack-form" noValidate onSubmit={submit}>
           <div className="form-grid form-grid-two">
             <Field label="Role">
               <select value={form.role} onChange={(event) => { update("role", event.target.value); update("facilityId", ""); update("donorCity", ""); }}>
                 {USER_ROLE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </Field>
-            <Field label="Username" hint="Required, unique"><input required value={form.username} onChange={(event) => update("username", event.target.value)} placeholder="lhe.hospital.admin" /></Field>
+            <Field label="Username" hint="Required, unique" error={errors.username}><input value={form.username} onChange={(event) => update("username", event.target.value)} placeholder="lhe.hospital.admin" /></Field>
           </div>
-          <Field label="Email" hint="Required"><input required type="email" value={form.email} onChange={(event) => update("email", event.target.value)} placeholder="admin@example.test" /></Field>
-          <Field label="Password" hint="Minimum 12 characters"><input required type="password" minLength={12} value={form.password} onChange={(event) => update("password", event.target.value)} /></Field>
+          <Field label="Email" hint="Required" error={errors.email}><input type="email" value={form.email} onChange={(event) => update("email", event.target.value)} placeholder="admin@example.test" /></Field>
+          <Field label="Password" hint="Minimum 8 characters" error={errors.password}><input type="password" value={form.password} onChange={(event) => update("password", event.target.value)} /></Field>
           {form.role === "DONOR" ? (
             <div className="form-grid form-grid-two">
-              <Field label="Donor city shard" hint="Required">
-                <select required value={form.donorCity} onChange={(event) => update("donorCity", event.target.value)}>
+              <Field label="Donor city shard" hint="Required" error={errors.donorCity}>
+                <select value={form.donorCity} onChange={(event) => update("donorCity", event.target.value)}>
                   <option value="">Select a city</option>
                   {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
                 </select>
               </Field>
-              <Field label="Donor ID" hint="UUID of an existing donor profile">
-                <input required value={form.facilityId} onChange={(event) => update("facilityId", event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" />
+              <Field label="Donor ID" hint="UUID of an existing donor profile" error={errors.facilityId}>
+                <input value={form.facilityId} onChange={(event) => update("facilityId", event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" />
               </Field>
             </div>
           ) : selected?.needs ? (
-            <Field label={form.role === "HOSPITAL_ADMIN" ? "Hospital" : "Blood bank"} hint={form.role === "HOSPITAL_ADMIN" ? "Required" : "Required"}>
-              <select required value={form.facilityId} onChange={(event) => update("facilityId", event.target.value)}>
+            <Field label={form.role === "HOSPITAL_ADMIN" ? "Hospital" : "Blood bank"} hint={form.role === "HOSPITAL_ADMIN" ? "Required" : "Required"} error={errors.facilityId}>
+              <select value={form.facilityId} onChange={(event) => update("facilityId", event.target.value)}>
                 <option value="">{facilityOptions.length ? "Select a facility" : `No ${form.role === "HOSPITAL_ADMIN" ? "hospitals" : "blood banks"} registered yet`}</option>
                 {facilityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>

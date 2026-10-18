@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { CITY_CODES } from "../../backend/src/db/shard-router.js";
 import { integerOption, printSummary, request, required } from "./harness.js";
 
 const baseUrl = process.env.LOADTEST_BASE_URL ?? "http://127.0.0.1:8080";
@@ -21,8 +22,8 @@ const timeoutMs = integerOption(
 );
 const confirm = process.env.LOADTEST_CONFIRM === "1";
 
-if (!["KHI", "LHE", "ISB"].includes(city)) {
-  throw new Error("LOADTEST_CITY must be KHI, LHE, or ISB.");
+if (!CITY_CODES.includes(city)) {
+  throw new Error(`LOADTEST_CITY must be one of: ${CITY_CODES.join(", ")}.`);
 }
 if (!confirm) {
   throw new Error(

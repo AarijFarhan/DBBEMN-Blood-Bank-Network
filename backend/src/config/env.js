@@ -1,5 +1,7 @@
 import { hkdfSync, randomUUID } from "node:crypto";
 
+import { CITY_CODES } from "../db/shard-router.js";
+
 function numberFromEnv(name, fallback, { min, max } = {}) {
   const raw = process.env[name];
   const value = raw === undefined || raw === "" ? fallback : Number(raw);
@@ -30,7 +32,7 @@ function detectDatabaseMode() {
     }
     return raw;
   }
-  const perCity = ["KHI_DATABASE_URL", "LHE_DATABASE_URL", "ISB_DATABASE_URL"].filter(
+  const perCity = CITY_CODES.map((cityCode) => `${cityCode}_DATABASE_URL`).filter(
     (name) => process.env[name],
   );
   return perCity.length > 0 ? "distributed" : "single";
@@ -49,9 +51,7 @@ if (databaseMode === "single" && !process.env.DATABASE_URL) {
 if (databaseMode === "distributed") {
   const missing = [
     ["CATALOG_DATABASE_URL", process.env.CATALOG_DATABASE_URL],
-    ["KHI_DATABASE_URL", process.env.KHI_DATABASE_URL],
-    ["LHE_DATABASE_URL", process.env.LHE_DATABASE_URL],
-    ["ISB_DATABASE_URL", process.env.ISB_DATABASE_URL],
+    ...CITY_CODES.map((cityCode) => [`${cityCode}_DATABASE_URL`, process.env[`${cityCode}_DATABASE_URL`]]),
   ]
     .filter(([, value]) => !value)
     .map(([name]) => name);
@@ -82,11 +82,14 @@ export const env = Object.freeze({
   databaseMode,
   databaseUrl: process.env.DATABASE_URL,
   catalogDatabaseUrl: process.env.CATALOG_DATABASE_URL ?? process.env.DATABASE_URL,
-  cityDatabaseUrls: Object.freeze({
-    KHI: process.env.KHI_DATABASE_URL ?? process.env.DATABASE_URL,
-    LHE: process.env.LHE_DATABASE_URL ?? process.env.DATABASE_URL,
-    ISB: process.env.ISB_DATABASE_URL ?? process.env.DATABASE_URL,
-  }),
+  cityDatabaseUrls: Object.freeze(
+    Object.fromEntries(
+      CITY_CODES.map((cityCode) => [
+        cityCode,
+        process.env[`${cityCode}_DATABASE_URL`] ?? process.env.DATABASE_URL,
+      ]),
+    ),
+  ),
   jwtSecret,
   jwtRefreshSecret,
   corsOrigins: (process.env.CORS_ORIGINS ?? "")

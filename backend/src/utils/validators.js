@@ -8,7 +8,7 @@ export const componentSchema = z.enum(["WHOLE_BLOOD", "PRBC", "PLATELETS", "PLAS
 export const urgencySchema = z.enum(["CRITICAL", "URGENT", "ROUTINE"]);
 export const uuidSchema = z.string().uuid();
 export const passwordSchema = z.string()
-  .min(12)
+  .min(8)
   .max(72)
   .refine((value) => Buffer.byteLength(value, "utf8") <= 72, "Password must be at most 72 UTF-8 bytes.");
 

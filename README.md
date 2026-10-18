@@ -752,12 +752,12 @@ cp .env.example .env
 | `DB_MODE` | inferred | `single` or `distributed`. If unset, presence of any `*_DATABASE_URL` implies distributed. |
 | `DATABASE_URL` | — | Required in `single` mode. |
 | `CATALOG_DATABASE_URL` | `DATABASE_URL` | Catalog node — **where `catalog.users` lives**. |
-| `KHI_DATABASE_URL` | `DATABASE_URL` | Karachi shard. |
-| `LHE_DATABASE_URL` | `DATABASE_URL` | Lahore shard. |
-| `ISB_DATABASE_URL` | `DATABASE_URL` | Islamabad shard. |
+| `<CITY>_DATABASE_URL` | `DATABASE_URL` | One per entry in `CITY_CODES` (see `backend/src/db/shard-router.js`), e.g. `KHI_DATABASE_URL` (Karachi), `LHE_DATABASE_URL` (Lahore), `ISB_DATABASE_URL` (Islamabad). |
 
-> In `distributed` mode all four of `CATALOG_/KHI_/LHE_/ISB_DATABASE_URL` are mandatory;
-> the script and app pool registries both throw if any is missing. Writing
+> In `distributed` mode every `CATALOG_`/`<CITY>_DATABASE_URL` for the codes in
+> `CITY_CODES` is mandatory; the script and app pool registries both throw if any is
+> missing. The default topology ships **ten** city nodes
+> (`KHI, LHE, ISB, RWP, FSD, MUL, PEW, QUE, HYD, GUJ`). Writing
 > `catalog.users` to a city node is the split-brain the whole design prevents — if you
 > cannot find a user in the database, check you are querying `CATALOG_DATABASE_URL`.
 
@@ -816,16 +816,16 @@ public bundle at build time; never put a secret in one.
 # 1. install
 pnpm install
 
-# 2. start the four PostgreSQL nodes
+# 2. start the PostgreSQL nodes (default topology: 1 catalog + 10 city shards)
 docker compose up -d
-#    published on 5436 (catalog), 5433 (khi), 5434 (lhe), 5435 (isb)
+#    published on 5436 (catalog) and one port per city shard
 
 # 3. apply migrations (idempotent, fans out to each node)
 pnpm migrate
 
 # 4. optional demo data
-pnpm seed:small     # deterministic: 2 donors, 2 units per city
-pnpm seed           # large: 5,000 donors + 50,000 units per city
+pnpm seed:small     # deterministic: 2 donors, 2 units for the original cities
+pnpm seed           # large: 5,000 donors + 50,000 units per city (all CITY_CODES)
 
 # 5. create the first system administrator (interactive)
 pnpm bootstrap:admin
@@ -858,7 +858,7 @@ donation notes `SIMULATED large seed` / `Development demo seed`.
 | `pnpm reset-test-schemas` | Drop prefixed test schemas. Refuses on an empty prefix. |
 
 > `bootstrap:admin` requires an interactive TTY (it disables echo for the password) and
-> enforces a 12-character minimum. `bcrypt` silently truncates past 72 **bytes**, which
+> enforces an 8-character minimum. `bcrypt` silently truncates past 72 **bytes**, which
 > is why the app caps passwords at 72 UTF-8 bytes.
 
 ---

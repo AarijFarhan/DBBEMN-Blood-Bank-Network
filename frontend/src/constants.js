@@ -23,6 +23,13 @@ export const CITIES = [
   { cityCode: "KHI", name: "Karachi" },
   { cityCode: "LHE", name: "Lahore" },
   { cityCode: "ISB", name: "Islamabad" },
+  { cityCode: "RWP", name: "Rawalpindi" },
+  { cityCode: "FSD", name: "Faisalabad" },
+  { cityCode: "MUL", name: "Multan" },
+  { cityCode: "PEW", name: "Peshawar" },
+  { cityCode: "QUE", name: "Quetta" },
+  { cityCode: "HYD", name: "Hyderabad" },
+  { cityCode: "GUJ", name: "Gujranwala" },
 ];
 
 export const BLOOD_GROUPS = ["A", "B", "AB", "O"];

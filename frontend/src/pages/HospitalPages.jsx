@@ -6,6 +6,16 @@ import { useRequest } from "../hooks/useRequest";
 import { BLOOD_GROUPS, COMPONENTS, RH_FACTORS, RESERVATION_STATUSES } from "../constants";
 import { Button, EmptyState, ErrorState, Field, LoadingState, Modal, Notice, PageHeader, PartialResults, SectionCard, SimulatedBadge, StatusBadge } from "../components/UI";
 import { createRequestId, errorDetails, formatBloodType, formatComponent, formatDate, formatDateTime, formatNumber, friendlyError, listFrom, normalizeResult } from "../utils";
+import { hasErrors, maxLength, number, oneOf, required, validate, useFieldErrors } from "../validation";
+
+const SEARCH_RULES = {
+  patientBloodGroup: [required("Patient ABO group"), oneOf(BLOOD_GROUPS, "Patient ABO group")],
+  patientRh: [required("Rh factor"), oneOf(RH_FACTORS, "Rh factor")],
+  component: [required("Component")],
+  unitsNeeded: [required("Units needed"), number({ min: 1, max: 10, integer: true, label: "Units needed" })],
+  urgency: [required("Urgency")],
+  searchScope: [required("Search scope")],
+};
 
 function UnitResult({ unit, onReserve, busy }) {
   const type = formatBloodType(unit.bloodGroup, unit.rhFactor);
@@ -38,16 +48,21 @@ export function HospitalSearchPage() {
   const [form, setForm] = useState({ patientBloodGroup: "O", patientRh: "NEG", component: "PRBC", unitsNeeded: 1, urgency: "URGENT", allowPartial: false, searchScope: "ALL_CITIES" });
   const [state, setState] = useState({ loading: false, error: null, data: null });
   const [action, setAction] = useState({ id: null, error: null, success: null });
+  const { errors, setErrors, clearError } = useFieldErrors();
   const hospitalId = user?.hospitalId;
   const results = useMemo(() => listFrom(state.data, ["units", "results", "items"]).map(normalizeResult), [state.data]);
   const meta = state.data?.meta || null;
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+    clearError(name);
   }
 
   async function search(event) {
     event.preventDefault();
+    const nextErrors = validate(form, SEARCH_RULES);
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setState({ loading: true, error: null, data: null });
     setAction({ id: null, error: null, success: null });
     try {
@@ -116,18 +131,18 @@ export function HospitalSearchPage() {
       {action.error ? <Notice tone="error" title="Reservation could not be completed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
       <div className="workspace-grid workspace-grid-wide">
         <SectionCard title="Emergency request" description="Use a unique request for each new allocation attempt.">
-          <form className="stack-form" onSubmit={search}>
+          <form className="stack-form" noValidate onSubmit={search}>
             <div className="form-grid form-grid-two">
-              <Field label="Patient ABO group"><select value={form.patientBloodGroup} onChange={(event) => update("patientBloodGroup", event.target.value)}>{BLOOD_GROUPS.map((value) => <option key={value}>{value}</option>)}</select></Field>
-              <Field label="Rh factor"><select value={form.patientRh} onChange={(event) => update("patientRh", event.target.value)}>{RH_FACTORS.map((value) => <option key={value} value={value}>{value === "POS" ? "Positive" : "Negative"}</option>)}</select></Field>
+              <Field label="Patient ABO group" error={errors.patientBloodGroup}><select value={form.patientBloodGroup} onChange={(event) => update("patientBloodGroup", event.target.value)}>{BLOOD_GROUPS.map((value) => <option key={value}>{value}</option>)}</select></Field>
+              <Field label="Rh factor" error={errors.patientRh}><select value={form.patientRh} onChange={(event) => update("patientRh", event.target.value)}>{RH_FACTORS.map((value) => <option key={value} value={value}>{value === "POS" ? "Positive" : "Negative"}</option>)}</select></Field>
             </div>
             <div className="form-grid form-grid-two">
-              <Field label="Component"><select value={form.component} onChange={(event) => update("component", event.target.value)}>{COMPONENTS.map((value) => <option key={value.value} value={value.value}>{value.label}</option>)}</select></Field>
-              <Field label="Urgency"><select value={form.urgency} onChange={(event) => update("urgency", event.target.value)}><option value="CRITICAL">Critical · 60 minute hold</option><option value="URGENT">Urgent · 30 minute hold</option><option value="ROUTINE">Routine · 30 minute hold</option></select></Field>
+              <Field label="Component" error={errors.component}><select value={form.component} onChange={(event) => update("component", event.target.value)}>{COMPONENTS.map((value) => <option key={value.value} value={value.value}>{value.label}</option>)}</select></Field>
+              <Field label="Urgency" error={errors.urgency}><select value={form.urgency} onChange={(event) => update("urgency", event.target.value)}><option value="CRITICAL">Critical · 60 minute hold</option><option value="URGENT">Urgent · 30 minute hold</option><option value="ROUTINE">Routine · 30 minute hold</option></select></Field>
             </div>
             <div className="form-grid form-grid-two">
-              <Field label="Units needed"><input type="number" min="1" max="10" value={form.unitsNeeded} onChange={(event) => update("unitsNeeded", event.target.value)} /></Field>
-              <Field label="Search scope"><select value={form.searchScope} onChange={(event) => update("searchScope", event.target.value)}><option value="ALL_CITIES">All cities · ranked</option><option value="LOCAL_FIRST">Local city first</option></select></Field>
+              <Field label="Units needed" error={errors.unitsNeeded}><input type="number" min="1" max="10" value={form.unitsNeeded} onChange={(event) => update("unitsNeeded", event.target.value)} /></Field>
+              <Field label="Search scope" error={errors.searchScope}><select value={form.searchScope} onChange={(event) => update("searchScope", event.target.value)}><option value="ALL_CITIES">All cities · ranked</option><option value="LOCAL_FIRST">Local city first</option></select></Field>
             </div>
             <label className="checkbox-field checkbox-field-inline"><input type="checkbox" checked={form.allowPartial} onChange={(event) => update("allowPartial", event.target.checked)} /><span><strong>Allow partial fulfillment</strong><small>Keep available matches if one or more city shards cannot satisfy the full request.</small></span></label>
             <Button type="submit" disabled={state.loading}>{state.loading ? "Searching network…" : "Search available units"}</Button>
@@ -178,12 +193,14 @@ export function HospitalReservationsPage() {
   const [reason, setReason] = useState("");
   const [patientRef, setPatientRef] = useState("");
   const [actionState, setActionState] = useState({ loading: false, error: null, success: null });
+  const { errors, setErrors, clearError, clearAll } = useFieldErrors();
   const request = useReservationList(status, user?.hospitalId);
   const reservations = request.data?.reservations || [];
 
   function openCancel(reservation) {
     setSelected(reservation);
     setReason("");
+    clearAll();
     setActionState({ loading: false, error: null, success: null });
     setModal("cancel");
   }
@@ -191,12 +208,18 @@ export function HospitalReservationsPage() {
   function openTransfuse(reservation) {
     setSelected(reservation);
     setPatientRef("");
+    clearAll();
     setActionState({ loading: false, error: null, success: null });
     setModal("transfuse");
   }
 
   async function completeAction() {
     if (!selected) return;
+    const nextErrors = modal === "transfuse"
+      ? validate({ patientRef }, { patientRef: [required("Patient reference"), maxLength(120, "Patient reference")] })
+      : validate({ reason }, { reason: [maxLength(500, "Reason")] });
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setActionState({ loading: true, error: null, success: null });
     try {
       if (modal === "cancel") {
@@ -224,7 +247,7 @@ export function HospitalReservationsPage() {
       </SectionCard>
       <Modal open={Boolean(modal)} title={modal === "cancel" ? "Cancel reservation" : "Confirm transfusion"} onClose={() => setModal(null)} footer={<><Button variant="ghost" onClick={() => setModal(null)}>Keep open</Button><Button variant={modal === "cancel" ? "danger" : "primary"} onClick={completeAction} disabled={actionState.loading || (modal === "transfuse" && !patientRef.trim())}>{actionState.loading ? "Saving…" : modal === "cancel" ? "Cancel reservation" : "Confirm transfusion"}</Button></>}>
         {actionState.error ? <Notice tone="error" title="Action failed">{friendlyError(actionState.error)}{errorDetails(actionState.error) ? ` ${errorDetails(actionState.error)}` : ""}</Notice> : null}
-        {modal === "cancel" ? <Field label="Reason" hint="Optional. The reason is stored with the reservation audit."><textarea rows="3" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Reason for cancellation" /></Field> : <Field label="Patient reference" hint="Use a pseudonymous reference, never a patient name."><input required value={patientRef} onChange={(event) => setPatientRef(event.target.value)} placeholder="Pseudonymous patient reference" /></Field>}
+        {modal === "cancel" ? <Field label="Reason" hint="Optional. The reason is stored with the reservation audit." error={errors.reason}><textarea rows="3" value={reason} onChange={(event) => { setReason(event.target.value); clearError("reason"); }} placeholder="Reason for cancellation" /></Field> : <Field label="Patient reference" hint="Use a pseudonymous reference, never a patient name." error={errors.patientRef}><input value={patientRef} onChange={(event) => { setPatientRef(event.target.value); clearError("patientRef"); }} placeholder="Pseudonymous patient reference" /></Field>}
       </Modal>
     </div>
   );

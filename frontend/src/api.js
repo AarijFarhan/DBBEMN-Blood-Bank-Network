@@ -2,9 +2,16 @@ const RENDER_API_ORIGIN = "https://dbbemn-blood-bank-network.onrender.com";
 const API_PREFIX = "/api/v1";
 
 const configuredApiUrl = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
-const API_ROOT = configuredApiUrl.endsWith(API_PREFIX)
-  ? configuredApiUrl
-  : `${configuredApiUrl || RENDER_API_ORIGIN}${API_PREFIX}`;
+// Resolution order:
+//   1. VITE_API_URL when set (explicit override, e.g. staging).
+//   2. In dev, a relative "/api/v1" so the Vite proxy forwards to localhost:8080
+//      and the browser never sees a cross-origin request.
+//   3. Production build with no config keeps the Render fallback.
+const API_ROOT = configuredApiUrl
+  ? (configuredApiUrl.endsWith(API_PREFIX) ? configuredApiUrl : `${configuredApiUrl}${API_PREFIX}`)
+  : import.meta.env.DEV
+    ? API_PREFIX
+    : `${RENDER_API_ORIGIN}${API_PREFIX}`;
 
 const SESSION_KEY = "dbbemn.session";
 const listeners = new Set();
@@ -183,7 +190,7 @@ export const api = {
     list: (params) => request(queryPath("/units", params)),
     get: (id, params) => request(queryPath(`/units/${id}`, params)),
     reserve: (id, body, params) => request(queryPath(`/units/${id}/reserve`, params), { method: "POST", body }),
-    discard: (id, body, params) => request(queryPath(`/units/${id}/discard`, params), { method: "POST", body: body || {} }),
+    discard: (id, body, params) => request(queryPath(`/units/${id}/discard`, params), { method: "PATCH", body: body || {} }),
   },
   donations: {
     list: (params) => request(queryPath("/donations", params)),

@@ -37,13 +37,8 @@ const SOURCE_URL =
   "postgresql://postgres:postgres@localhost:5432/dbbemn";
 
 function targetUrl(kind, database) {
-  const map = {
-    catalog: "CATALOG_DATABASE_URL",
-    KHI: "KHI_DATABASE_URL",
-    LHE: "LHE_DATABASE_URL",
-    ISB: "ISB_DATABASE_URL",
-  };
-  const fromEnv = process.env[map[kind]];
+  const envName = kind === "catalog" ? "CATALOG_DATABASE_URL" : `${kind}_DATABASE_URL`;
+  const fromEnv = process.env[envName];
   if (fromEnv) return fromEnv;
   const url = new URL(SOURCE_URL);
   url.pathname = `/${database}`;
@@ -52,9 +47,12 @@ function targetUrl(kind, database) {
 
 const TARGETS = {
   catalog: targetUrl("catalog", "dbbemn_catalog"),
-  KHI: targetUrl("KHI", "dbbemn_khi"),
-  LHE: targetUrl("LHE", "dbbemn_lhe"),
-  ISB: targetUrl("ISB", "dbbemn_isb"),
+  ...Object.fromEntries(
+    CITY_CODES.map((cityCode) => [
+      cityCode,
+      targetUrl(cityCode, `dbbemn_${cityCode.toLowerCase()}`),
+    ]),
+  ),
 };
 
 /**

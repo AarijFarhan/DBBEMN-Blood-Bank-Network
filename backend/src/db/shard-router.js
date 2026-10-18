@@ -1,4 +1,15 @@
-export const CITY_CODES = Object.freeze(["KHI", "LHE", "ISB"]);
+export const CITY_CODES = Object.freeze([
+  "KHI",
+  "LHE",
+  "ISB",
+  "RWP",
+  "FSD",
+  "MUL",
+  "PEW",
+  "QUE",
+  "HYD",
+  "GUJ",
+]);
 
 const CITY_CODE_SET = new Set(CITY_CODES);
 const SCHEMA_PREFIX_PATTERN = /^(?:[a-z][a-z0-9_]{0,20})?$/;

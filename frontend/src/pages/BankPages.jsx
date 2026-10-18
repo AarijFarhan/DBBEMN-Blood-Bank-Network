@@ -5,6 +5,15 @@ import { useRequest } from "../hooks/useRequest";
 import { BLOOD_GROUPS, COMPONENTS, RH_FACTORS, UNIT_STATUSES } from "../constants";
 import { Button, EmptyState, ErrorState, Field, LoadingState, Modal, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
 import { errorDetails, formatBloodType, formatComponent, formatDate, formatDateTime, formatNumber, friendlyError, listFrom, normalizeResult } from "../utils";
+import { hasErrors, maxLength, number, oneOf, required, uuid, validate, useFieldErrors } from "../validation";
+
+const DONATION_RULES = {
+  donorId: [required("Donor ID"), uuid("Donor ID")],
+  volumeMl: [required("Collected volume"), number({ min: 350, max: 500, integer: true, label: "Collected volume" })],
+  componentType: [required("Component"), oneOf(COMPONENTS.map((component) => component.value), "Component")],
+};
+
+const DISCARD_RULES = { reason: [maxLength(500, "Reason")] };
 
 function UnitFilters({ status, setStatus, query, setQuery }) {
   return (
@@ -34,6 +43,7 @@ export function BankInventoryPage() {
   const [selected, setSelected] = useState(null);
   const [reason, setReason] = useState("");
   const [action, setAction] = useState({ loading: false, error: null, success: null });
+  const { errors, setErrors, clearError, clearAll } = useFieldErrors();
   const request = useRequest(() => api.units.list({ bankId: user?.bloodBankId, status: status || undefined, limit: 100 }), [status, user?.bloodBankId]);
   const units = useMemo(() => listFrom(request.data, ["units", "items"]).map(normalizeResult).filter((unit) => !query || [unit.unitId, unit.bloodGroup, unit.rhFactor, unit.componentType, unit.status].some((value) => String(value || "").toLowerCase().includes(query.toLowerCase()))), [request.data, query]);
   const available = units.filter((unit) => unit.status === "AVAILABLE").length;
@@ -43,11 +53,15 @@ export function BankInventoryPage() {
   function openDiscard(unit) {
     setSelected(unit);
     setReason("");
+    clearAll();
     setAction({ loading: false, error: null, success: null });
   }
 
   async function discard() {
     if (!selected) return;
+    const nextErrors = validate({ reason }, DISCARD_RULES);
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     try {
       await api.units.discard(selected.unitId, { reason: reason || undefined });
@@ -68,7 +82,7 @@ export function BankInventoryPage() {
       <Modal open={Boolean(selected)} title="Discard unit" onClose={() => setSelected(null)} footer={<><Button variant="ghost" onClick={() => setSelected(null)}>Keep unit</Button><Button variant="danger" onClick={discard} disabled={action.loading}>{action.loading ? "Discarding…" : "Discard unit"}</Button></>}>
         {action.error ? <Notice tone="error" title="Discard failed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
         <p className="modal-copy">Discarding is restricted to available and quarantined units. The state transition is recorded by the primary shard.</p>
-        <Field label="Reason" hint="Optional audit context."><textarea rows="3" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Temperature excursion, expired label, or other reason" /></Field>
+        <Field label="Reason" hint="Optional audit context." error={errors.reason}><textarea rows="3" value={reason} onChange={(event) => { setReason(event.target.value); clearError("reason"); }} placeholder="Temperature excursion, expired label, or other reason" /></Field>
       </Modal>
     </div>
   );
@@ -78,15 +92,20 @@ export function BankDonationsPage() {
   const { user } = useAuth();
   const [form, setForm] = useState({ donorId: "", volumeMl: 450, componentType: "PRBC" });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
+  const { errors, setErrors, clearError } = useFieldErrors();
   const donations = useRequest(() => api.donations.list({ limit: 100 }), []);
   const donors = useRequest(() => api.search.donors({ available: "true", limit: 100 }), []);
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+    clearError(name);
   }
 
   async function submit(event) {
     event.preventDefault();
+    const nextErrors = validate(form, DONATION_RULES);
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     try {
       await api.donations.create({ donorId: form.donorId, bloodBankId: user?.bloodBankId, volumeMl: Number(form.volumeMl), components: [{ componentType: form.componentType, volumeMl: Number(form.volumeMl) }] });
@@ -105,11 +124,11 @@ export function BankDonationsPage() {
       {action.success ? <Notice tone="success" title="Donation recorded">{action.success}</Notice> : null}
       <div className="workspace-grid workspace-grid-wide">
         <SectionCard title="New collection" description="Eligibility is checked against age, weight, availability, and donation interval.">
-          <form className="stack-form" onSubmit={submit}>
-            <Field label="Donor"><select required value={form.donorId} onChange={(event) => update("donorId", event.target.value)}><option value="">Select an available donor</option>{donorRows.map((donor) => <option key={donor.donorId} value={donor.donorId}>{donor.fullName} · {formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</option>)}</select></Field>
+          <form className="stack-form" noValidate onSubmit={submit}>
+            <Field label="Donor" error={errors.donorId}><select value={form.donorId} onChange={(event) => update("donorId", event.target.value)}><option value="">Select an available donor</option>{donorRows.map((donor) => <option key={donor.donorId} value={donor.donorId}>{donor.fullName} · {formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</option>)}</select></Field>
             {donors.error ? <span className="field-hint">Donor search unavailable. Paste a donor UUID below.</span> : null}
-            <Field label="Donor ID" hint="Required UUID from the donor directory."><input required value={form.donorId} onChange={(event) => update("donorId", event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /></Field>
-            <div className="form-grid form-grid-two"><Field label="Collected volume (ml)"><input type="number" min="350" max="500" step="1" required value={form.volumeMl} onChange={(event) => update("volumeMl", event.target.value)} /></Field><Field label="Component"><select value={form.componentType} onChange={(event) => update("componentType", event.target.value)}>{COMPONENTS.map((component) => <option key={component.value} value={component.value}>{component.label}</option>)}</select></Field></div>
+            <Field label="Donor ID" hint="Required UUID from the donor directory." error={errors.donorId}><input value={form.donorId} onChange={(event) => update("donorId", event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /></Field>
+            <div className="form-grid form-grid-two"><Field label="Collected volume (ml)" error={errors.volumeMl}><input type="number" min="350" max="500" step="1" value={form.volumeMl} onChange={(event) => update("volumeMl", event.target.value)} /></Field><Field label="Component" error={errors.componentType}><select value={form.componentType} onChange={(event) => update("componentType", event.target.value)}>{COMPONENTS.map((component) => <option key={component.value} value={component.value}>{component.label}</option>)}</select></Field></div>
             <Button type="submit" disabled={action.loading}>{action.loading ? "Recording donation…" : "Record donation"}</Button>
           </form>
         </SectionCard>
@@ -183,11 +202,22 @@ export function BankDiscardPage() {
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const [selected, setSelected] = useState(null);
   const [reason, setReason] = useState("");
+  const { errors, setErrors, clearError, clearAll } = useFieldErrors();
   const request = useRequest(() => api.units.list({ status: "QUARANTINE", limit: 100 }), []);
   const units = listFrom(request.data, ["units", "items"]).map(normalizeResult);
 
+  function openDiscard(unit) {
+    setSelected(unit);
+    setReason("");
+    clearAll();
+    setAction({ loading: false, error: null, success: null });
+  }
+
   async function discard() {
     if (!selected) return;
+    const nextErrors = validate({ reason }, DISCARD_RULES);
+    setErrors(nextErrors);
+    if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     try {
       await api.units.discard(selected.unitId, { reason: reason || undefined });
@@ -204,10 +234,10 @@ export function BankDiscardPage() {
       <PageHeader eyebrow="Blood bank workspace" title="Discard units" description="Quarantine inventory that must not enter the reserveable pool." actions={<Button variant="secondary" onClick={request.reload}>Refresh quarantine</Button>} />
       {action.success ? <Notice tone="success" title="Inventory updated">{action.success}</Notice> : null}
       <SectionCard title="Quarantine units" description="Discard is permitted for QUARANTINE or AVAILABLE units only.">
-        {request.loading ? <LoadingState label="Loading quarantine units" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? <UnitTable units={units} onDiscard={setSelected} emptyTitle="No quarantined units" /> : null}
+        {request.loading ? <LoadingState label="Loading quarantine units" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? <UnitTable units={units} onDiscard={openDiscard} emptyTitle="No quarantined units" /> : null}
       </SectionCard>
       <Modal open={Boolean(selected)} title="Discard quarantined unit" onClose={() => setSelected(null)} footer={<><Button variant="ghost" onClick={() => setSelected(null)}>Keep unit</Button><Button variant="danger" onClick={discard} disabled={action.loading}>{action.loading ? "Discarding…" : "Discard unit"}</Button></>}>
-        {action.error ? <Notice tone="error" title="Discard failed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}<p className="modal-copy">This action is checked against the current unit status on the primary shard.</p><Field label="Reason"><textarea rows="3" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Optional reason" /></Field>
+        {action.error ? <Notice tone="error" title="Discard failed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}<p className="modal-copy">This action is checked against the current unit status on the primary shard.</p><Field label="Reason" error={errors.reason}><textarea rows="3" value={reason} onChange={(event) => { setReason(event.target.value); clearError("reason"); }} placeholder="Optional reason" /></Field>
       </Modal>
     </div>
   );

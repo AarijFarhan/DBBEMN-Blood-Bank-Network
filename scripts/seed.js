@@ -119,6 +119,7 @@ const COMPONENTS = Object.freeze([
 async function insertCatalogSeed(client) {
   for (const cityCode of CITY_CODES) {
     const city = CITY_SEED[cityCode];
+    if (!city) continue;
     for (const [bankId, name, address, latitude, longitude] of city.banks) {
       await client.query(
         `INSERT INTO catalog.blood_banks
@@ -213,6 +214,7 @@ async function main() {
   // Why: city-specific seed transactions mirror the app's single-city write
   // rule and keep the demo seed safe to rerun using deterministic identifiers.
   for (const cityCode of CITY_CODES) {
+    if (!DONOR_SEED[cityCode]) continue;
     const client = await connectForCity(cityCode)();
     try {
       await client.query("BEGIN");

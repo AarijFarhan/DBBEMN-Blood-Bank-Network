@@ -3,11 +3,11 @@
 #   db-catalog : catalog + common schemas. Every authenticated request reads
 #                catalog.users, so this node is the auth hot path. It holds no
 #                city inventory, donors or blood units.
-#   db-khi     : khi_hot / khi_history / khi_read
-#   db-lhe     : lhe_hot / lhe_history / lhe_read
-#   db-isb     : isb_hot / isb_history / isb_read
+#   db-<city>  : <city>_hot / <city>_history / <city>_read, one service per entry
+#                in CITY_CODES (backend/src/db/shard-router.js):
+#                khi, lhe, isb, rwp, fsd, mul, pew, que, hyd, guj.
 #
-# All four nodes get 00-common.sql because the city shard tables declare columns
+# Every node gets 00-common.sql because the city shard tables declare columns
 # as common.blood_group_t, common.rh_t, common.unit_status_t and call
 # common.compatible_donor(). Without it a city node cannot even create its own
 # tables, let alone serve a query.
@@ -93,8 +93,113 @@ services:
       - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
       - ./db/migrations:/migrations:ro
 
+  db-rwp:
+    <<: *pg-common
+    container_name: dbbemn-db-rwp
+    ports:
+      - "${RWP_PORT:-5437}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: RWP
+    volumes:
+      - rwp-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+  db-fsd:
+    <<: *pg-common
+    container_name: dbbemn-db-fsd
+    ports:
+      - "${FSD_PORT:-5438}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: FSD
+    volumes:
+      - fsd-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+  db-mul:
+    <<: *pg-common
+    container_name: dbbemn-db-mul
+    ports:
+      - "${MUL_PORT:-5439}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: MUL
+    volumes:
+      - mul-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+  db-pew:
+    <<: *pg-common
+    container_name: dbbemn-db-pew
+    ports:
+      - "${PEW_PORT:-5440}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: PEW
+    volumes:
+      - pew-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+  db-que:
+    <<: *pg-common
+    container_name: dbbemn-db-que
+    ports:
+      - "${QUE_PORT:-5441}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: QUE
+    volumes:
+      - que-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+  db-hyd:
+    <<: *pg-common
+    container_name: dbbemn-db-hyd
+    ports:
+      - "${HYD_PORT:-5442}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: HYD
+    volumes:
+      - hyd-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
+  db-guj:
+    <<: *pg-common
+    container_name: dbbemn-db-guj
+    ports:
+      - "${GUJ_PORT:-5443}:5432"
+    environment:
+      <<: *pg-env
+      CITY_CODE: GUJ
+    volumes:
+      - guj-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+      - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
+      - ./db/migrations:/migrations:ro
+
 volumes:
   catalog-data:
   khi-data:
   lhe-data:
   isb-data:
+  rwp-data:
+  fsd-data:
+  mul-data:
+  pew-data:
+  que-data:
+  hyd-data:
+  guj-data:

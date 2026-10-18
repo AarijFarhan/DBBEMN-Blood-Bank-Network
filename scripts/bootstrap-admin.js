@@ -75,9 +75,9 @@ function promptPassword(label) {
 async function main() {
   const username = await promptLine("First system admin username: ");
   const email = await promptLine("First system admin email: ");
-  const password = await promptPassword("Password (hidden, 12+ characters): ");
-  if (!username || !email || password.length < 12) {
-    throw new Error("Username, email, and a password of at least 12 characters are required.");
+  const password = await promptPassword("Password (hidden, 8+ characters): ");
+  if (!username || !email || password.length < 8) {
+    throw new Error("Username, email, and a password of at least 8 characters are required.");
   }
 
   const passwordHash = await bcrypt.hash(password, 12);

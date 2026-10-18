@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import app from "../src/app.js";
-import { schemasFor } from "../src/db/shard-router.js";
+import { CITY_CODES, schemasFor } from "../src/db/shard-router.js";
 import { getCatalogPool, getPoolForCity, waitForDatabases } from "../src/db/registry.js";
 
 // Every shard assertion in this file is about KHI, so the shard fixtures and
@@ -108,7 +108,7 @@ test("Phase 2: auth, catalog, tenant scope, donors, donations, units, and health
   assert.equal(health.response.status, 200);
   assert.ok(health.response.headers.get("x-instance-id"));
   assert.equal(health.data.status, "ready");
-  assert.deepEqual(Object.keys(health.data.cities).sort(), ["ISB", "KHI", "LHE"]);
+  assert.deepEqual(Object.keys(health.data.cities).sort(), [...CITY_CODES].sort());
 
   const login = await request("/auth/login", {
     method: "POST",
