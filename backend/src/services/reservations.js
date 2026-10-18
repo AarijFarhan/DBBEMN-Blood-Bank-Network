@@ -7,6 +7,7 @@ import { AppError } from "../middleware/errors.js";
 import { assertCityWritable } from "./chaos.js";
 import { invalidateCityInventory } from "../cache/store.js";
 import { KIND, rememberCreated } from "./presence.js";
+import { EVENT_TYPES, publish } from "../lib/bus.js";
 
 export { assertCityWritable };
 
@@ -160,6 +161,16 @@ export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
     // Best-effort: a failure here untrusts the filter rather than lying.
     for (const reservation of result.reservations) {
       await rememberCreated(KIND.RESERVATION, cityCode, reservation.reservationId);
+      publish(EVENT_TYPES.RESERVATION_CREATED, {
+        cityCode,
+        reservationId: reservation.reservationId,
+        unitId: reservation.unitId,
+        hospitalId: reservation.hospitalId,
+        bloodBankId: null,
+        urgency: reservation.urgency,
+        status: reservation.status,
+        bloodGroup: reservation.patientBloodGroup,
+      });
     }
   }
   return result;
@@ -227,6 +238,16 @@ export async function reserveSpecificUnit(cityCode, request, unitId) {
     await invalidateCityInventory(cityCode);
     for (const reservation of result.reservations) {
       await rememberCreated(KIND.RESERVATION, cityCode, reservation.reservationId);
+      publish(EVENT_TYPES.RESERVATION_CREATED, {
+        cityCode,
+        reservationId: reservation.reservationId,
+        unitId: reservation.unitId,
+        hospitalId: reservation.hospitalId,
+        bloodBankId: null,
+        urgency: reservation.urgency,
+        status: reservation.status,
+        bloodGroup: reservation.patientBloodGroup,
+      });
     }
   }
   return result;
@@ -306,6 +327,11 @@ export async function compensateCityReservations(cityCode, request, reservations
   // just as a reservation does.
   if (result.compensated > 0) {
     await invalidateCityInventory(cityCode);
+    publish(EVENT_TYPES.RESERVATION_UPDATED, {
+      cityCode,
+      change: "compensated",
+      count: result.compensated,
+    });
   }
   return result;
 }

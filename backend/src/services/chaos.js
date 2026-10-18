@@ -1,6 +1,7 @@
 import { getCatalogPool, getPoolForCity } from "../db/registry.js";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { AppError } from "../middleware/errors.js";
+import { EVENT_TYPES, publish } from "../lib/bus.js";
 
 const CACHE_TTL_MS = 1_000;
 let cachedFlags = null;
@@ -100,7 +101,14 @@ export async function setChaosFlag(cityCode, patch) {
     throw new AppError(404, "CITY_NOT_FOUND", "The chaos city was not found.");
   }
   invalidateChaosCache();
-  return normalizeFlag(result.rows[0]);
+  const flag = normalizeFlag(result.rows[0]);
+  publish(EVENT_TYPES.CHAOS_FLAG_CHANGED, {
+    cityCode: flag.cityCode,
+    primaryDown: flag.primaryDown,
+    replicaDown: flag.replicaDown,
+    extraLagMs: flag.extraLagMs,
+  });
+  return flag;
 }
 
 export async function assertCityWritable(clientOrCity, cityArgument) {

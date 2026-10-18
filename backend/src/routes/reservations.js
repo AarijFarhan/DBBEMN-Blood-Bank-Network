@@ -15,6 +15,7 @@ import {
 } from "../services/reservations.js";
 import { invalidateCityInventory } from "../cache/store.js";
 import { KIND, locateAcrossCities } from "../services/presence.js";
+import { EVENT_TYPES, publish } from "../lib/bus.js";
 import {
   cityCodeSchema,
   manualReservationSchema,
@@ -189,6 +190,13 @@ async function doDispatch(cityCode, reservationId, bankId) {
   // The unit left the available pool, so any cached search for this city that
   // still lists it is now offering blood that is already in transit.
   await invalidateCityInventory(cityCode);
+  publish(EVENT_TYPES.RESERVATION_UPDATED, {
+    cityCode,
+    reservationId: result.reservationId,
+    unitId: result.unitId,
+    change: "dispatched",
+    status: result.status,
+  });
   return result;
 }
 
@@ -230,6 +238,14 @@ async function doTransfuse(cityCode, reservationId, hospitalId, body) {
     return { ...reservation.rows[0], cityCode };
   });
   await invalidateCityInventory(cityCode);
+  publish(EVENT_TYPES.RESERVATION_UPDATED, {
+    cityCode,
+    reservationId: result.reservationId,
+    unitId: result.unitId,
+    change: "transfused",
+    status: result.status,
+    hospitalId,
+  });
   return result;
 }
 
@@ -273,6 +289,14 @@ async function doCancel(cityCode, reservationId, reason) {
   // Cancellation returns the unit to the pool, so cached results for this city
   // that omit it are under-reporting stock.
   await invalidateCityInventory(cityCode);
+  publish(EVENT_TYPES.RESERVATION_UPDATED, {
+    cityCode,
+    reservationId: result.reservationId,
+    unitId: result.unitId,
+    change: "cancelled",
+    status: result.status,
+    reason: reason ?? null,
+  });
   return result;
 }
 

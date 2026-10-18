@@ -211,6 +211,10 @@ export const api = {
     live: () => request("/health/live", { auth: false }),
     ready: () => request("/health/ready", { auth: false }),
   },
+  stats: {
+    overview: () => request("/stats/overview"),
+    timeseries: (params) => request(queryPath("/stats/timeseries", params)),
+  },
   system: {
     cluster: () => request("/admin/cluster-status"),
     chaos: (city, action, body) => request(`/admin/chaos/${city}/${action}`, { method: "POST", body }),

@@ -9,9 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "leaflet": "^1.9.4",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "react-router-dom": "^6.28.1"
+    "react-router-dom": "^6.28.1",
+    "recharts": "^2.15.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "catalog:",

@@ -13,9 +13,11 @@ import chaosRoutes from "./routes/chaos.js";
 import donationRoutes from "./routes/donations.js";
 import donorRoutes from "./routes/donors.js";
 import donorRequestRoutes from "./routes/donor-requests.js";
+import eventsRoutes from "./routes/events.js";
 import healthRoutes from "./routes/health.js";
 import reservationRoutes from "./routes/reservations.js";
 import searchRoutes from "./routes/search.js";
+import statsRoutes from "./routes/stats.js";
 import unitRoutes from "./routes/units.js";
 
 const app = express();
@@ -69,6 +71,8 @@ app.use("/api/v1", donorRequestRoutes);
 app.use("/api/v1", donationRoutes);
 app.use("/api/v1", unitRoutes);
 app.use("/api/v1", reservationRoutes);
+app.use("/api/v1", statsRoutes);
+app.use("/api/v1", eventsRoutes);
 
 if (existsSync(frontendDir)) {
   app.use("/api", express.static(frontendDir, { index: "index.html", fallthrough: true }));

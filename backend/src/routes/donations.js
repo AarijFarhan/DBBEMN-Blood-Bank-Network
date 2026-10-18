@@ -12,6 +12,7 @@ import { getActiveBank } from "../services/catalog.js";
 import { assertCityWritable } from "../services/chaos.js";
 import { invalidateCityInventory } from "../cache/store.js";
 import { KIND, rememberCreated } from "../services/presence.js";
+import { EVENT_TYPES, publish } from "../lib/bus.js";
 import {
   cityCodeSchema,
   componentSchema,
@@ -144,6 +145,12 @@ router.post(
     for (const unit of created.units) {
       await rememberCreated(KIND.UNIT, cityCode, unit.unitId);
     }
+    publish(EVENT_TYPES.DONATION_CREATED, {
+      cityCode,
+      donationId,
+      bloodBankId: body.bloodBankId,
+      units: created.units.length,
+    });
 
     res.status(201).json({ donation: created });
   }),
@@ -209,6 +216,13 @@ router.patch(
     if (result.units.length > 0) {
       await invalidateCityInventory(cityCode);
     }
+    publish(EVENT_TYPES.SCREENING_COMPLETED, {
+      cityCode,
+      donationId: result.donationId,
+      bloodBankId: req.user.blood_bank_id,
+      screeningStatus: result.screeningStatus,
+      units: result.units.length,
+    });
     res.json({ donation: result });
   }),
 );

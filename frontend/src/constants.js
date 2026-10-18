@@ -80,8 +80,8 @@ export const URGENCIES = [
 
 export function roleHome(role) {
   if (role === ROLES.HOSPITAL_ADMIN) return "/app/hospital/search";
-  if (role === ROLES.BLOODBANK_ADMIN) return "/app/bank/inventory";
+  if (role === ROLES.BLOODBANK_ADMIN) return "/app/bank/dashboard";
   if (role === ROLES.DONOR) return "/app/donor/profile";
-  if (role === ROLES.SYSTEM_ADMIN) return "/app/system/health";
+  if (role === ROLES.SYSTEM_ADMIN) return "/app/system/dashboard";
   return "/login";
 }

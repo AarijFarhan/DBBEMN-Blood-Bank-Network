@@ -14,13 +14,15 @@ const testFiles = Object.freeze({
   // and fail fast. Keeping them in their own phase also means they can be run on
   // their own without migrating or seeding anything.
   cache: ["cache.test.js"],
+  // The event bus feeding the SSE dashboard is likewise pure in-memory logic.
+  events: ["events.test.js"],
   phase1: ["phase1.test.js"],
   phase2: ["phase2.test.js"],
   phase3: ["phase3.test.js"],
 });
 
 if (!testFiles[phase]) {
-  throw new Error("Usage: node scripts/run-test.js <cache|phase1|phase2|phase3>");
+  throw new Error("Usage: node scripts/run-test.js <cache|events|phase1|phase2|phase3>");
 }
 
 const prefix = process.env.SCHEMA_PREFIX ?? defaults[phase];

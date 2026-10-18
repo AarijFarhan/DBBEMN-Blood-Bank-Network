@@ -992,10 +992,19 @@ Stated plainly, because they bound what the system can honestly claim.
    authenticated request reads `catalog.users`. Sharding by geography removes
    inventory SPOFs but introduces an auth SPOF; removing it needs either a read replica
    or token self-containment.
-8. **No frontend test suite.**
-9. **Legacy scaffolding in `lib/`.** `lib/db` is an empty Drizzle schema; `lib/api-spec`
-   and `lib/api-client-react` cover only `/api/healthz` and are not imported by the
-   frontend.
+8. **The live event feed is in-process, like the in-memory cache and breakers.**
+   `GET /api/v1/events/stream` (SSE) and the dashboards that consume it read an
+   in-memory bus. On a single instance this is correct; across several, each
+   instance only publishes and replays its own writes, so a hospital watching a
+   stream served by instance A will not see a mutation committed through
+   instance B. The `X-Instance-Id` response header and the `instance` field on
+   every event make that boundary visible rather than silent. A shared broker
+   (Redis pub/sub, NATS) is the fix, same as for the cache; until then, pin the
+   SSE route to a single instance or accept the feed as per-instance.
+9. **No frontend test suite.**
+10. **Legacy scaffolding in `lib/`.** `lib/db` is an empty Drizzle schema; `lib/api-spec`
+    and `lib/api-client-react` cover only `/api/healthz` and are not imported by the
+    frontend.
 
 ---
 

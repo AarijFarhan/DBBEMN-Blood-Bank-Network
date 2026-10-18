@@ -10,6 +10,7 @@ import { getActiveBank } from "../services/catalog.js";
 import { assertCityWritable } from "../services/chaos.js";
 import { invalidateCityInventory } from "../cache/store.js";
 import { KIND, locateAcrossCities } from "../services/presence.js";
+import { EVENT_TYPES, publish } from "../lib/bus.js";
 import { cityCodeSchema, uuidSchema } from "../utils/validators.js";
 
 const router = Router();
@@ -148,12 +149,19 @@ router.patch(
            RETURNING unit_id AS "unitId", status`,
           [id.data],
         );
-        return { ...update.rows[0], cityCode };
+        return { ...update.rows[0], cityCode, bloodBankId: current.rows[0].blood_bank_id };
       });
       if (changed) {
         // The unit left the searchable pool, so cached search and summary
         // entries for this city are now wrong.
         await invalidateCityInventory(cityCode);
+        publish(EVENT_TYPES.UNIT_UPDATED, {
+          cityCode,
+          unitId: changed.unitId,
+          bloodBankId: changed.bloodBankId,
+          change: "discarded",
+          status: changed.status,
+        });
         res.json({ unit: changed });
         return;
       }

@@ -10,8 +10,10 @@ const navigation = {
     { to: "/app/hospital/search", label: "Find blood", detail: "Search & reserve", icon: "search" },
     { to: "/app/hospital/reservations", label: "Reservations", detail: "Track requests", icon: "calendar" },
     { to: "/app/hospital/donor-requests", label: "Donor call-outs", detail: "Ask a donor", icon: "megaphone" },
+    { to: "/app/hospital/map", label: "Network map", detail: "Live stock map", icon: "map" },
   ],
   BLOODBANK_ADMIN: [
+    { to: "/app/bank/dashboard", label: "Dashboard", detail: "Live analytics", icon: "gauge" },
     { to: "/app/bank/inventory", label: "Inventory", detail: "Units & expiry", icon: "boxes" },
     { to: "/app/bank/donations", label: "Donations", detail: "Record collection", icon: "droplet" },
     { to: "/app/bank/donor-requests", label: "Donor call-outs", detail: "Ask a donor", icon: "megaphone" },
@@ -25,6 +27,8 @@ const navigation = {
     { to: "/app/donor/donations", label: "Donation history", detail: "Past collections", icon: "history" },
   ],
   SYSTEM_ADMIN: [
+    { to: "/app/system/dashboard", label: "Analytics", detail: "Network dashboards", icon: "gauge" },
+    { to: "/app/system/map", label: "Network map", detail: "Live stock map", icon: "map" },
     { to: "/app/system/health", label: "Health", detail: "Service checks", icon: "activity" },
     { to: "/app/system/chaos", label: "Chaos controls", detail: "Failure switches", icon: "sliders" },
     { to: "/app/system/cluster", label: "Cluster status", detail: "Shard telemetry", icon: "server" },

@@ -4,6 +4,7 @@ import { allCityPools, getPoolForCity } from "../db/registry.js";
 import { env } from "../config/env.js";
 import { assertCityWritable, getChaosFlag } from "../services/chaos.js";
 import { invalidateCityInventory } from "../cache/store.js";
+import { EVENT_TYPES, publish } from "../lib/bus.js";
 
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const REPLICA_INTERVAL_MS = 1_000;
@@ -113,6 +114,11 @@ export async function sweepCity(cityCode) {
     // not invalidate every cache entry on every idle tick.
     if (result.released > 0 || result.expired > 0) {
       await invalidateCityInventory(cityCode);
+      publish(EVENT_TYPES.SWEEP_COMPLETED, {
+        cityCode,
+        released: result.released,
+        expired: result.expired,
+      });
     }
     return result;
   } catch (error) {

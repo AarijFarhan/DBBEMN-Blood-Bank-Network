@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./auth";
 import { roleHome } from "./constants";
@@ -9,6 +10,24 @@ import { BankDiscardPage, BankDonationsPage, BankDispatchPage, BankInventoryPage
 import { DonorDonationsPage, DonorProfilePage } from "./pages/DonorPages";
 import { ChaosPage, ClusterPage, DonorDirectoryPage, HealthPage, HospitalsBanksPage, UsersPage } from "./pages/SystemPages";
 import { MyDonorRequestsPage, SendDonorRequestsPage } from "./pages/RequestPages";
+
+// The dashboard pulls in Recharts and the map pulls in Leaflet. Both are
+// heavy enough to be worth deferring until the route is actually visited, so
+// the login and search screens stay fast.
+const SystemDashboardPage = lazy(() =>
+  import("./pages/DashboardPages").then((module) => ({ default: module.SystemDashboardPage })));
+const BankDashboardPage = lazy(() =>
+  import("./pages/DashboardPages").then((module) => ({ default: module.BankDashboardPage })));
+const NetworkMapPage = lazy(() =>
+  import("./pages/MapPage").then((module) => ({ default: module.NetworkMapPage })));
+
+function LazyPage({ label, Component }) {
+  return (
+    <Suspense fallback={<div className="full-page-state"><LoadingState label={label} /></div>}>
+      <Component />
+    </Suspense>
+  );
+}
 
 function RequireAuth({ roles, children }) {
   const { user, booting, session } = useAuth();
@@ -40,8 +59,10 @@ export default function App() {
             <Route path="/app/hospital/search" element={<HospitalSearchPage />} />
             <Route path="/app/hospital/reservations" element={<HospitalReservationsPage />} />
             <Route path="/app/hospital/donor-requests" element={<SendDonorRequestsPage />} />
+            <Route path="/app/hospital/map" element={<LazyPage label="Loading network map" Component={NetworkMapPage} />} />
           </Route>
           <Route element={<RequireAuth roles={["BLOODBANK_ADMIN"]}><AppShell /></RequireAuth>}>
+            <Route path="/app/bank/dashboard" element={<LazyPage label="Loading analytics" Component={BankDashboardPage} />} />
             <Route path="/app/bank/inventory" element={<BankInventoryPage />} />
             <Route path="/app/bank/donations" element={<BankDonationsPage />} />
             <Route path="/app/bank/screening" element={<BankScreeningPage />} />
@@ -55,6 +76,8 @@ export default function App() {
             <Route path="/app/donor/requests" element={<MyDonorRequestsPage />} />
           </Route>
           <Route element={<RequireAuth roles={["SYSTEM_ADMIN"]}><AppShell /></RequireAuth>}>
+            <Route path="/app/system/dashboard" element={<LazyPage label="Loading analytics" Component={SystemDashboardPage} />} />
+            <Route path="/app/system/map" element={<LazyPage label="Loading network map" Component={NetworkMapPage} />} />
             <Route path="/app/system/health" element={<HealthPage />} />
             <Route path="/app/system/chaos" element={<ChaosPage />} />
             <Route path="/app/system/cluster" element={<ClusterPage />} />
