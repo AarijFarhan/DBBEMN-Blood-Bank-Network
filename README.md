@@ -227,7 +227,7 @@ The cache is real but off unless you configure it, which is worth stating plainl
 |---|---|
 | Redis | **Optional.** `ioredis` is a dependency and `REDIS_URL` is read at boot. With no URL the process uses a bounded in-memory LRU. The API is fully correct either way. |
 | Bloom filters | **Implemented, opt-out.** Rebuilt from the tables at boot. An untrusted filter is never consulted, so an unbuilt filter is the pre-optimisation behaviour, not a wrong answer. Disable with `BLOOM_ENABLED=false`. |
-| Nginx | **Not used.** Load balancing is done by `gateway/gateway.js` (Node). |
+| Nginx | **Used.** `nginx/nginx.conf` reverse proxy + load balancer (`least_conn`) to backend instances on `:8080`/`:8081`/`:8082`. `gateway/gateway.js` bypassed when using nginx. |
 | Tailwind CSS | **Not used.** Styling is a single hand-written stylesheet. |
 | NestJS | **Not used.** The backend is plain Express. |
 | Dockerised app tier | **PostgreSQL only.** `docker-compose.yml` starts the 4 database nodes; the backend runs on the host (`pnpm start`). |

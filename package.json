@@ -38,7 +38,15 @@
     "test:phase3": "node --env-file-if-exists=.env ./scripts/run-test.js phase3",
     "loadtest:mixed": "node --env-file-if-exists=.env ./scripts/loadtest/mixed.js",
     "loadtest:contention": "node --env-file-if-exists=.env ./scripts/loadtest/contention.js",
-    "bootstrap:admin": "node --env-file-if-exists=.env ./scripts/bootstrap-admin.js"
+    "test:phase3": "node --env-file-if-exists=.env ./scripts/run-test.js phase3",
+    "loadtest:mixed": "node --env-file-if-exists=.env ./scripts/loadtest/mixed.js",
+    "loadtest:contention": "node --env-file-if-exists=.env ./scripts/loadtest/contention.js",
+    "bootstrap:admin": "node --env-file-if-exists=.env ./scripts/bootstrap-admin.js",
+    "nginx:config": "type C:\\nginx\\nginx-1.26.2\\conf\\nginx.conf",
+    "nginx:start": "start /b C:\\nginx\\nginx-1.26.2\\nginx.exe -c C:\\nginx\\nginx-1.26.2\\conf\\nginx.conf",
+    "nginx:stop": "taskkill /F /IM nginx.exe 2>nul || exit 0",
+    "start:nginx": "pnpm -r --if-present --filter backend build 2>/dev/null; node --env-file-if-exists=.env ./scripts/start-nginx.js",
+    "start:workers": "concurrently --kill-others \"PORT=4001 INSTANCE_ID=worker-1 node --env-file-if-exists=.env ./backend/src/index.js\" \"PORT=4002 INSTANCE_ID=worker-2 node --env-file-if-exists=.env ./backend/src/index.js\" \"PORT=4003 INSTANCE_ID=worker-3 node --env-file-if-exists=.env ./backend/src/index.js\""
   },
   "private": true,
   "devDependencies": {
