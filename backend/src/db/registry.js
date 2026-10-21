@@ -25,18 +25,21 @@ import {
 // city would triple the connection count against a single database for no
 // isolation benefit, since there is only one server to isolate from.
 const singlePool =
-  env.databaseMode === "single" ? createPool(env.databaseUrl, { label: "single" }) : null;
+  env.databaseMode === "single"
+    ? createPool(env.databaseUrl, { label: "single", max: env.db.poolMaxSingle })
+    : null;
 
 const cityPools = Object.freeze(
   Object.fromEntries(
     CITY_CODES.map((cityCode) => [
       cityCode,
-      singlePool ?? createPool(env.cityDatabaseUrls[cityCode], { label: cityCode }),
+      singlePool ?? createPool(env.cityDatabaseUrls[cityCode], { label: cityCode, max: env.db.poolMaxCity }),
     ]),
   ),
 );
 
-const catalogPool = singlePool ?? createPool(env.catalogDatabaseUrl, { label: "catalog" });
+const catalogPool =
+  singlePool ?? createPool(env.catalogDatabaseUrl, { label: "catalog", max: env.db.poolMaxCatalog });
 
 /** Pool owning the `catalog` and `common` schemas. */
 export function getCatalogPool() {

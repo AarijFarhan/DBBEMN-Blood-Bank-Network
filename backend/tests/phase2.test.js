@@ -123,7 +123,7 @@ test("Phase 2: auth, catalog, tenant scope, donors, donations, units, and health
 
   const cities = await request("/cities");
   assert.equal(cities.response.status, 200);
-  assert.equal(cities.data.cities.length, 3);
+  assert.equal(cities.data.cities.length, CITY_CODES.length);
 
   const hospital = await request("/admin/hospitals", {
     method: "POST",

@@ -51,26 +51,36 @@ async function attachIssuerNames(rows) {
   const bankIds = [...new Set(rows.map((row) => row.requestedByBloodBankId).filter(Boolean))];
   if (hospitalIds.length === 0 && bankIds.length === 0) return rows;
 
-  const catalog = getCatalogPool();
-  const [hospitals, banks] = await Promise.all([
-    hospitalIds.length === 0
-      ? []
-      : catalog
-          .query(`SELECT hospital_id, name FROM catalog.hospitals WHERE hospital_id = ANY($1::uuid[])`, [hospitalIds])
-          .then((result) => new Map(result.rows.map((row) => [row.hospital_id, row.name]))),
-    bankIds.length === 0
-      ? []
-      : catalog
-          .query(`SELECT blood_bank_id, name FROM catalog.blood_banks WHERE blood_bank_id = ANY($1::uuid[])`, [bankIds])
-          .then((result) => new Map(result.rows.map((row) => [row.blood_bank_id, row.name]))),
-  ]);
+  // One catalog connection for both lookups. They are two small reads against
+  // the same table family, and the catalog pool is the hottest pool in the
+  // system (one lookup per authenticated request), so taking two slots here
+  // would queue unrelated requests behind a single list call.
+  const client = await getCatalogPool().connect();
+  try {
+    const hospitalNames = new Map();
+    if (hospitalIds.length > 0) {
+      const result = await client.query(
+        `SELECT hospital_id, name FROM catalog.hospitals WHERE hospital_id = ANY($1::uuid[])`,
+        [hospitalIds],
+      );
+      for (const row of result.rows) hospitalNames.set(row.hospital_id, row.name);
+    }
 
-  const hospitalNames = hospitals.length === 0 ? new Map() : hospitals;
-  const bankNames = banks.length === 0 ? new Map() : banks;
+    const bankNames = new Map();
+    if (bankIds.length > 0) {
+      const result = await client.query(
+        `SELECT blood_bank_id, name FROM catalog.blood_banks WHERE blood_bank_id = ANY($1::uuid[])`,
+        [bankIds],
+      );
+      for (const row of result.rows) bankNames.set(row.blood_bank_id, row.name);
+    }
 
-  for (const row of rows) {
-    row.hospitalName = row.requestedByHospitalId ? hospitalNames.get(row.requestedByHospitalId) ?? null : null;
-    row.bloodBankName = row.requestedByBloodBankId ? bankNames.get(row.requestedByBloodBankId) ?? null : null;
+    for (const row of rows) {
+      row.hospitalName = row.requestedByHospitalId ? hospitalNames.get(row.requestedByHospitalId) ?? null : null;
+      row.bloodBankName = row.requestedByBloodBankId ? bankNames.get(row.requestedByBloodBankId) ?? null : null;
+    }
+  } finally {
+    client.release();
   }
   return rows;
 }

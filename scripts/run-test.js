@@ -26,12 +26,28 @@ if (!testFiles[phase]) {
 }
 
 const prefix = process.env.SCHEMA_PREFIX ?? defaults[phase];
+
+const env = { ...process.env, SCHEMA_PREFIX: prefix };
+
+// The cache suite documents that it runs against the in-memory backend only:
+// its assertions are about the logic, not about the storage engine. An ambient
+// REDIS_URL - which the development .env now sets - would otherwise switch the
+// backend underneath those assertions and turn them into a test of Redis
+// availability rather than of the cache logic.
+if (phase === "cache") env.REDIS_URL = "";
+
+// A cache namespace of its own for every run. Without it a run shares keys
+// with any instance that is already up (the development workers, a staging
+// box) and the two can overwrite each other's entries mid-test - which shows
+// up as a Bloom filter losing bits and reporting a false negative.
+env.CACHE_KEY_PREFIX = `test${phase}${process.pid}`;
+
 const child = spawn(
   process.execPath,
   ["--test", ...testFiles[phase].map((name) => path.join(root, "backend", "tests", name))],
   {
     cwd: root,
-    env: { ...process.env, SCHEMA_PREFIX: prefix },
+    env,
     stdio: "inherit",
   },
 );

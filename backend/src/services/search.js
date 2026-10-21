@@ -5,6 +5,9 @@ import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { AppError } from "../middleware/errors.js";
 import { getChaosFlags, measureReplicaLagMs } from "./chaos.js";
 import { buildKey, recall, remember } from "../cache/searchCache.js";
+import { logger } from "../lib/logger.js";
+
+const log = logger.child({ module: "search" });
 
 const GROUPS = new Set(["A", "B", "AB", "O"]);
 const RH_FACTORS = new Set(["POS", "NEG"]);
@@ -168,6 +171,116 @@ function sourceTable(cityCode, source) {
   return source === "replica" ? `${read}.units_search` : `${hot}.blood_units`;
 }
 
+/**
+ * Bank coordinates resolved on the catalog node, ready to be passed to a shard.
+ *
+ * Why they have to come from the catalog: blood_banks and cities live on the
+ * catalog node while blood_units lives on a city node, so the two can never be
+ * joined in SQL on the shard. The catalog resolves the term once and the
+ * shard filters on the resulting bank ids.
+ *
+ * The city fallback is applied HERE, on the catalog, exactly as the old
+ * in-shard COALESCE(b.latitude, c.latitude) did - so the distance a client
+ * sees is unchanged.
+ */
+async function loadBankCoordinates() {
+  const result = await getCatalogPool().query(
+    `SELECT b.blood_bank_id,
+            COALESCE(b.latitude, c.latitude)::double precision AS latitude,
+            COALESCE(b.longitude, c.longitude)::double precision AS longitude
+     FROM catalog.blood_banks b
+     JOIN catalog.cities c ON c.city_code = b.city_code`,
+  );
+  return {
+    bankIds: result.rows.map((row) => row.blood_bank_id),
+    latitudes: result.rows.map((row) => row.latitude),
+    longitudes: result.rows.map((row) => row.longitude),
+  };
+}
+
+/**
+ * Resolve a free-text term to the set of blood banks it can match.
+ *
+ * The term is matched against the bank name, the city name and the city code,
+ * which is the same set the old in-shard predicate used. A city that matches
+ * contributes every bank in that city, because a hospital asking for "Lahore"
+ * wants the whole city.
+ */
+async function resolveBankIdsForTerm(term) {
+  const escaped = term.replace(/[!%_]/g, "!$&");
+  const result = await getCatalogPool().query(
+    `SELECT b.blood_bank_id
+     FROM catalog.blood_banks b
+     JOIN catalog.cities c ON c.city_code = b.city_code
+     WHERE b.name ILIKE $1 ESCAPE '!'
+        OR c.name ILIKE $1 ESCAPE '!'
+        OR b.city_code ILIKE $1 ESCAPE '!'`,
+    [`%${escaped}%`],
+  );
+  return result.rows.map((row) => row.blood_bank_id);
+}
+
+/**
+ * Everything the catalog has to contribute to one search.
+ *
+ * Both the free-text filter and the distance sort are physically impossible to
+ * evaluate on a shard, because the columns they need live on the catalog node.
+ * The catalog is therefore not an optional enrichment here: it is part of the
+ * query. When it is unreachable the query cannot be answered correctly, and
+ * saying so is better than returning a silently wrong result set.
+ */
+async function loadCatalogContext(query) {
+  const needsBankIds = Boolean(query.q);
+  const needsCoordinates = query.sortBy === "distance";
+  if (!needsBankIds && !needsCoordinates) {
+    return { bankIds: null, coordinates: null };
+  }
+  try {
+    const [bankIds, coordinates] = await Promise.all([
+      needsBankIds ? resolveBankIdsForTerm(query.q) : Promise.resolve(null),
+      needsCoordinates ? loadBankCoordinates() : Promise.resolve(null),
+    ]);
+    return { bankIds, coordinates };
+  } catch (error) {
+    log.warn({ err: error.message }, "catalog node unavailable for search");
+    throw new AppError(
+      503,
+      "CATALOG_UNAVAILABLE",
+      "The catalog node is unavailable, so this search cannot be resolved.",
+      { cause: error.message },
+      { "Retry-After": "5" },
+    );
+  }
+}
+
+/**
+ * Parameters for the coordinate join, allocated once so the distance
+ * expression and the join agree on the same placeholders.
+ */
+function coordinateParameters(values, coordinates) {
+  if (!coordinates) return null;
+  return {
+    bankIds: addParameter(values, coordinates.bankIds),
+    latitudes: addParameter(values, coordinates.latitudes),
+    longitudes: addParameter(values, coordinates.longitudes),
+  };
+}
+
+/**
+ * Join the catalog-resolved coordinates onto the shard rows.
+ *
+ * LEFT JOIN, so a bank the catalog did not know about yields a NULL distance
+ * rather than dropping the unit from the result set.
+ */
+function coordinateJoinClause(parameters) {
+  if (!parameters) return "";
+  return `LEFT JOIN unnest(
+                ${parameters.bankIds}::uuid[],
+                ${parameters.latitudes}::double precision[],
+                ${parameters.longitudes}::double precision[]
+              ) AS coord(bank_id, latitude, longitude) ON coord.bank_id = u.blood_bank_id`;
+}
+
 function distanceExpression(values, origin) {
   if (!origin) return null;
   const latitude = addParameter(values, origin.latitude);
@@ -177,10 +290,10 @@ function distanceExpression(values, origin) {
       sqrt(
         least(
           1::double precision,
-          power(sin(radians(COALESCE(b.latitude, c.latitude) - ${latitude}::double precision) / 2), 2)
+          power(sin(radians(coord.latitude - ${latitude}::double precision) / 2), 2)
           + cos(radians(${latitude}::double precision))
-          * cos(radians(COALESCE(b.latitude, c.latitude)))
-          * power(sin(radians(COALESCE(b.longitude, c.longitude) - ${longitude}::double precision) / 2), 2)
+          * cos(radians(coord.latitude))
+          * power(sin(radians(coord.longitude - ${longitude}::double precision) / 2), 2)
         )
       )
     )
@@ -210,7 +323,7 @@ function cursorPredicate(query, cursor, values, distance) {
   return `(${column}, u.unit_id) ${comparator} (${value}::${cast}, ${unitId}::uuid)`;
 }
 
-function buildWhere(query, values, distance, cursor) {
+function buildWhere(query, values, distance, cursor, context) {
   const clauses = ["u.expiry_date > CURRENT_DATE"];
   if (query.component) {
     clauses.push(`u.component_type = ${addParameter(values, query.component)}::common.component_t`);
@@ -248,19 +361,22 @@ function buildWhere(query, values, distance, cursor) {
     clauses.push(`u.expiry_date <= ${addParameter(values, query.expiresBefore)}::date`);
   }
   if (query.q) {
-    const escaped = query.q.replace(/[!%_]/g, "!$&");
-    const q = addParameter(values, `%${escaped}%`);
-    clauses.push(`(b.name ILIKE ${q} ESCAPE '!' OR c.name ILIKE ${q} ESCAPE '!' OR b.city_code ILIKE ${q} ESCAPE '!')`);
+    // The term was resolved to a set of bank ids on the catalog node; see
+    // resolveBankIdsForTerm. A shard only knows blood_bank_id, so the filter
+    // has to be pushed down as an id list rather than a name match.
+    const bankIds = addParameter(values, context?.bankIds ?? []);
+    clauses.push(`u.blood_bank_id = ANY(${bankIds}::uuid[])`);
   }
   const cursorClause = cursorPredicate(query, cursor, values, distance);
   if (cursorClause) clauses.push(cursorClause);
   return clauses.join(" AND ");
 }
 
-function buildSearchSql(cityCode, source, query, origin, cursor, limit) {
+function buildSearchSql(cityCode, source, query, origin, cursor, limit, context) {
   const values = [];
+  const coordinateParams = coordinateParameters(values, context?.coordinates ?? null);
   const distance = distanceExpression(values, query.sortBy === "distance" ? origin : null);
-  const where = buildWhere(query, values, distance, cursor);
+  const where = buildWhere(query, values, distance, cursor, context);
   const table = sourceTable(cityCode, source);
   const direction = query.order === "desc" ? "DESC" : "ASC";
   const sortExpression = query.sortBy === "distance"
@@ -277,6 +393,7 @@ function buildSearchSql(cityCode, source, query, origin, cursor, limit) {
   const limitParameter = addParameter(values, limit + 1);
   const statusClause = source === "primary" ? "AND u.status = 'AVAILABLE'::common.unit_status_t" : "";
   const distanceSelect = distance ?? "NULL::double precision";
+  const coordinateJoin = coordinateJoinClause(coordinateParams);
   const text = `
     SELECT u.unit_id AS "unitId",
            u.blood_bank_id AS "bloodBankId",
@@ -288,15 +405,16 @@ function buildSearchSql(cityCode, source, query, origin, cursor, limit) {
            u.expiry_date AS "expiryDate",
            ${distanceSelect} AS "distanceKm"
     FROM ${table} u
+    ${coordinateJoin}
     WHERE ${where} ${statusClause}
     ORDER BY ${orderBy}
     LIMIT ${limitParameter}`;
   return { text, values };
 }
 
-function buildSummarySql(cityCode, source, query) {
+function buildSummarySql(cityCode, source, query, context) {
   const values = [];
-  const where = buildWhere(query, values, null, null);
+  const where = buildWhere(query, values, null, null, context);
   const table = sourceTable(cityCode, source);
   const statusClause = source === "primary" ? "AND u.status = 'AVAILABLE'::common.unit_status_t" : "";
   const text = `
@@ -431,17 +549,26 @@ function dateString(value) {
  */
 async function loadBankDirectory(bankIds) {
   const unique = [...new Set(bankIds.filter(Boolean))];
-  if (unique.length === 0) return new Map();
+  if (unique.length === 0) return { directory: new Map(), degraded: false };
 
-  const result = await getCatalogPool().query(
-    `SELECT b.blood_bank_id AS "bloodBankId", b.name, c.name AS "cityName"
-     FROM catalog.blood_banks b
-     JOIN catalog.cities c ON c.city_code = b.city_code
-     WHERE b.blood_bank_id = ANY($1::uuid[])`,
-    [unique],
-  );
+  try {
+    const result = await getCatalogPool().query(
+      `SELECT b.blood_bank_id AS "bloodBankId", b.name, c.name AS "cityName"
+       FROM catalog.blood_banks b
+       JOIN catalog.cities c ON c.city_code = b.city_code
+       WHERE b.blood_bank_id = ANY($1::uuid[])`,
+      [unique],
+    );
 
-  return new Map(result.rows.map((row) => [row.bloodBankId, row]));
+    return { directory: new Map(result.rows.map((row) => [row.bloodBankId, row])), degraded: false };
+  } catch (error) {
+    // The names are decoration on top of the units, not the answer itself. The
+    // shard already returned real rows, so losing the directory costs labels,
+    // not data - and the caller is told about it in meta.warnings instead of
+    // receiving a 500 for a request that was fully answerable.
+    log.warn({ err: error.message }, "bank directory unavailable; returning units without names");
+    return { directory: new Map(), degraded: true };
+  }
 }
 
 function mapUnit(row, cityCode, directory) {
@@ -466,25 +593,58 @@ function mapUnit(row, cityCode, directory) {
   return unit;
 }
 
+function isMissing(value) {
+  return value === null || value === undefined;
+}
+
 function compareValues(left, right) {
   if (left === right) return 0;
-  if (left === null || left === undefined) return 1;
-  if (right === null || right === undefined) return -1;
+  if (isMissing(left)) return 1;
+  if (isMissing(right)) return -1;
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
 }
 
+/**
+ * The value a unit is ordered by.
+ *
+ * Only `distance` can be absent - a unit whose bank has no usable coordinates
+ * and no city fallback - but the shape stays generic so a new sort key cannot
+ * silently reintroduce the "missing value sorts first" bug.
+ */
+function orderValue(unit, query) {
+  switch (query.sortBy) {
+    case "expiryDate": return unit.expiryDate;
+    case "volumeMl": return unit.volumeMl;
+    case "collectedOn": return unit.collectedOn;
+    case "bloodGroup": return unit.bloodGroup;
+    case "distance": return unit.distanceKm ?? null;
+    default: return unit[query.sortBy] ?? null;
+  }
+}
+
 function compareUnits(left, right, query) {
+  const descending = query.order === "desc";
+  const leftValue = orderValue(left, query);
+  const rightValue = orderValue(right, query);
+
+  // A unit with no value for the sort key always sorts last, in BOTH
+  // directions. compareValues() treats a missing value as "greater", so the
+  // descending flip would otherwise float those units to the top of a
+  // descending page - exactly where a caller searching for the nearest blood
+  // does not expect to find them. The check therefore has to happen after the
+  // direction is known but before the comparison is negated.
+  if (isMissing(leftValue) !== isMissing(rightValue)) {
+    return isMissing(leftValue) ? 1 : -1;
+  }
+
   let comparison;
-  if (query.sortBy === "expiryDate") comparison = compareValues(left.expiryDate, right.expiryDate);
-  else if (query.sortBy === "volumeMl") comparison = compareValues(left.volumeMl, right.volumeMl);
-  else if (query.sortBy === "collectedOn") comparison = compareValues(left.collectedOn, right.collectedOn);
-  else if (query.sortBy === "bloodGroup") {
+  if (query.sortBy === "bloodGroup") {
     comparison = compareValues(left.bloodGroup, right.bloodGroup) || compareValues(left.rhFactor, right.rhFactor);
-  } else comparison = compareValues(left.distanceKm ?? null, right.distanceKm ?? null);
+  } else comparison = compareValues(leftValue, rightValue);
   if (comparison === 0) comparison = compareValues(left.unitId, right.unitId);
-  return query.order === "desc" ? -comparison : comparison;
+  return descending ? -comparison : comparison;
 }
 
 function cursorValue(unit, sortBy) {
@@ -499,14 +659,29 @@ function cursorValue(unit, sortBy) {
 
 async function loadDistanceOrigin(query) {
   if (query.sortBy !== "distance") return null;
-  const result = await getCatalogPool().query(`SELECT h.hospital_id, h.is_active,
-            COALESCE(h.latitude, c.latitude) AS latitude,
-            COALESCE(h.longitude, c.longitude) AS longitude
-     FROM catalog.hospitals h
-     JOIN catalog.cities c ON c.city_code = h.city_code
-     WHERE h.hospital_id = $1`,
-    [query.fromHospitalId],
-  );
+  let result;
+  try {
+    result = await getCatalogPool().query(`SELECT h.hospital_id, h.is_active,
+              COALESCE(h.latitude, c.latitude) AS latitude,
+              COALESCE(h.longitude, c.longitude) AS longitude
+       FROM catalog.hospitals h
+       JOIN catalog.cities c ON c.city_code = h.city_code
+       WHERE h.hospital_id = $1`,
+      [query.fromHospitalId],
+    );
+  } catch (error) {
+    // Unlike the display names, the origin is not decoration: without it the
+    // distance sort cannot be computed at all, and answering with a different
+    // ordering than the one that was asked for would be a silent lie.
+    log.warn({ err: error.message }, "catalog node unavailable for distance origin");
+    throw new AppError(
+      503,
+      "CATALOG_UNAVAILABLE",
+      "The catalog node is unavailable, so the distance origin cannot be resolved.",
+      { cause: error.message },
+      { "Retry-After": "5" },
+    );
+  }
   const hospital = result.rows[0];
   if (!hospital?.is_active) throw new AppError(404, "HOSPITAL_NOT_FOUND", "The origin hospital was not found or is inactive.");
   if (hospital.latitude === null || hospital.longitude === null) {
@@ -554,6 +729,9 @@ function makeMeta(cities, responses, unavailableCities, flags, source) {
     replicaLagMs: null,
     source,
     citySources: Object.fromEntries(responses.map((response) => [response.cityCode, response.source])),
+    // Non-fatal degradations the caller should know about: the answer is
+    // usable but something in it is missing.
+    warnings: [],
   };
 }
 
@@ -566,6 +744,7 @@ export async function searchUnits(input) {
     order: query.order,
   });
   const origin = await loadDistanceOrigin(query);
+  const context = await loadCatalogContext(query);
   const flags = await getChaosFlags();
 
   // Version-stamped read-through. A hit is only served when it was built from a
@@ -578,7 +757,7 @@ export async function searchUnits(input) {
   }
 
   const scattered = await scatterGather(query.cities, flags, async (cityCode, source) =>
-    sourceQueryForCity(cityCode, query, source, origin, cursor));
+    sourceQueryForCity(cityCode, query, source, origin, cursor, context));
   const units = [];
   const seen = new Set();
   for (const response of scattered.responses) {
@@ -590,7 +769,7 @@ export async function searchUnits(input) {
   }
   units.sort((left, right) => compareUnits(left, right, query));
   const page = units.slice(0, query.limit);
-  const directory = await loadBankDirectory(page.map((unit) => unit.bloodBankId));
+  const { directory, degraded } = await loadBankDirectory(page.map((unit) => unit.bloodBankId));
   for (const unit of page) {
     const bank = directory.get(unit.bloodBankId);
     if (bank) {
@@ -598,11 +777,20 @@ export async function searchUnits(input) {
       unit.cityName = bank.cityName;
     }
   }
-  const nextCursor = units.length > query.limit && page.length > 0
-    ? encodeSearchCursor({ ...cursorValue(page.at(-1), query.sortBy), fingerprint, sortBy: query.sortBy, order: query.order })
+  const lastUnit = page.at(-1);
+  // A unit with no value for the sort key cannot be expressed as a cursor
+  // position: the SQL predicate compares the sort value, and a NULL never
+  // compares true, so the next page could not be built from it anyway.
+  // Emitting a cursor would hand the client a token that fails to decode, so
+  // the page is ended here instead and the caller is told why.
+  const cursorable = lastUnit && !isMissing(orderValue(lastUnit, query));
+  const nextCursor = units.length > query.limit && cursorable
+    ? encodeSearchCursor({ ...cursorValue(lastUnit, query.sortBy), fingerprint, sortBy: query.sortBy, order: query.order })
     : null;
   const source = sourceForResponses(scattered.responses, flags, query.cities);
   const meta = makeMeta(query.cities, scattered.responses, scattered.unavailableCities, flags, source);
+  if (degraded) meta.warnings.push("BANK_DIRECTORY_UNAVAILABLE");
+  if (!cursorable && units.length > query.limit) meta.warnings.push("CURSOR_STOPPED_AT_MISSING_SORT_VALUE");
   meta.replicaLagMs = await collectLags(query.cities);
   const result = { units: page, nextCursor, meta };
 
@@ -619,14 +807,15 @@ export async function searchUnits(input) {
   return { ...result, cache: { status: "MISS" } };
 }
 
-async function sourceQueryForCity(cityCode, query, source, origin, cursor) {
-  const statement = buildSearchSql(cityCode, source, query, origin, cursor, query.limit);
+async function sourceQueryForCity(cityCode, query, source, origin, cursor, context) {
+  const statement = buildSearchSql(cityCode, source, query, origin, cursor, query.limit, context);
   const result = await getPoolForCity(cityCode).query(statement.text, statement.values);
   return result.rows;
 }
 
 export async function stockSummary(input) {
   const query = normalizeQuery({ ...input, sortBy: "expiryDate", order: "asc" });
+  const context = await loadCatalogContext(query);
   const flags = await getChaosFlags();
 
   // Same rules as searchUnits: version-stamped, and only ever cached when the
@@ -638,7 +827,7 @@ export async function stockSummary(input) {
   }
 
   const scattered = await scatterGather(query.cities, flags, async (cityCode, source) => {
-    const statement = buildSummarySql(cityCode, source, query);
+    const statement = buildSummarySql(cityCode, source, query, context);
     const result = await getPoolForCity(cityCode).query(statement.text, statement.values);
     return result.rows;
   });

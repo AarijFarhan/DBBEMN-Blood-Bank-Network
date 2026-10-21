@@ -29,6 +29,14 @@ import { logger } from "../lib/logger.js";
 
 const log = logger.child({ module: "cache" });
 
+/**
+ * Bits per pipelined SETBIT batch.
+ *
+ * Large enough that the round-trip cost disappears, small enough that one
+ * pipeline does not build a multi-megabyte command buffer.
+ */
+const BIT_BATCH_SIZE = 1000;
+
 /** Bounded LRU. Map preserves insertion order, so the first key is the coldest. */
 class MemoryStore {
   constructor(maxEntries) {
@@ -105,8 +113,20 @@ class RedisBackend {
   }
 
   async set(key, value, ttlSeconds) {
-    if (ttlSeconds > 0) await this.client.set(key, value, "EX", ttlSeconds);
-    else await this.client.set(key, value);
+    if (ttlSeconds > 0) {
+      // Redis takes whole seconds with EX, so a sub-second TTL has to go
+      // through PX. Without that, "EX 0.02" is an error and the entry either
+      // never gets a TTL or never gets written at all - and a cache entry
+      // that outlives its TTL is exactly what the TTL is there to prevent.
+      const milliseconds = Math.max(1, Math.round(ttlSeconds * 1000));
+      if (milliseconds >= 1000) {
+        await this.client.set(key, value, "EX", Math.ceil(milliseconds / 1000));
+      } else {
+        await this.client.set(key, value, "PX", milliseconds);
+      }
+    } else {
+      await this.client.set(key, value);
+    }
   }
 
   async del(key) {
@@ -121,12 +141,63 @@ class RedisBackend {
     await this.client.setbit(key, offset, "1");
   }
 
+  /**
+   * Set many bits at once.
+   *
+   * Why this exists: a bulk filter rebuild inserts millions of bits, and one
+   * round trip per bit turned a boot that took seconds into one that never
+   * finished. Pipelines turn each batch into a single round trip, so the cost
+   * is proportional to the number of batches rather than to the number of
+   * bits.
+   */
+  async setBits(key, offsets) {
+    if (offsets.length === 0) return;
+    for (let index = 0; index < offsets.length; index += BIT_BATCH_SIZE) {
+      const batch = offsets.slice(index, index + BIT_BATCH_SIZE);
+      const pipeline = this.client.pipeline();
+      for (const offset of batch) pipeline.setbit(key, offset, "1");
+      await pipeline.exec();
+    }
+  }
+
   async getBits(key, offsets) {
     if (offsets.length === 0) return [];
     const pipeline = this.client.pipeline();
     for (const offset of offsets) pipeline.getbit(key, offset);
     const results = await pipeline.exec();
     return results.map(([error, value]) => (error ? 0 : Number(value)));
+  }
+
+  /**
+   * Replace the whole bit map with the given set of offsets, in one round trip.
+   *
+   * Why a bulk replace instead of a pile of SETBITs: a filter rebuild sets
+   * hundreds of thousands of bits, and even pipelined that is hundreds of
+   * round trips per filter - long enough to hold the boot open. The offsets
+   * are computed locally anyway, so the bit string can be assembled in memory
+   * and written once.
+   *
+   * Replacing rather than merging is correct for this caller: it derives the
+   * filter from the authoritative table, so any bit left over from an earlier
+   * larger rebuild would only ever cause a false positive, and dropping it
+   * makes the filter exact.
+   */
+  async replaceBits(key, offsets) {
+    if (offsets.length === 0) {
+      await this.client.del(key);
+      return;
+    }
+    let highest = 0;
+    for (const offset of offsets) if (offset > highest) highest = offset;
+    const buffer = Buffer.alloc(Math.ceil((highest + 1) / 8));
+    for (const offset of offsets) {
+      // MSB first, which is how Redis numbers the bits of a string. The layout
+      // has to match GETBIT exactly, or the filter that is written and the
+      // filter that is read back are two different filters - and a Bloom filter
+      // that disagrees with itself reports false negatives.
+      buffer[offset >>> 3] |= 0x80 >> (offset & 7);
+    }
+    await this.client.set(key, buffer);
   }
 
   async quit() {
@@ -162,23 +233,52 @@ class MemoryBits {
 
   setBit(key, offset) {
     let buffer = this.bufferFor(key);
-    if (offset >= buffer.length) {
-      // Double until the offset fits, so a large filter costs O(log n) reallocs
-      // rather than one per insert.
+    const byteIndex = offset >>> 3;
+    if (byteIndex >= buffer.length) {
+      // Grow by bytes, not by bit offsets: the buffer holds 8 bits per byte, so
+      // sizing it against the raw offset would over-allocate by 8x and leave
+      // getBit's bounds check comparing bits against a byte count.
       let size = buffer.length;
-      while (size <= offset) size *= 2;
+      while (size <= byteIndex) size *= 2;
       const grown = new Uint8Array(size);
       grown.set(buffer);
       this.buffers.set(key, grown);
       buffer = grown;
     }
-    buffer[offset >>> 3] |= 1 << (offset & 7);
+    buffer[byteIndex] |= 0x80 >> (offset & 7);
   }
 
   getBit(key, offset) {
     const buffer = this.buffers.get(key);
-    if (!buffer || offset >= buffer.length) return 0;
-    return (buffer[offset >>> 3] >>> (offset & 7)) & 1;
+    // The buffer is measured in bytes and the offset in bits, so the bound is
+    // eight times the length. Comparing the bit offset against the byte count
+    // would report "absent" for every bit past the first few kilobytes - a
+    // false negative, which is the one thing a Bloom filter must never do.
+    if (!buffer || offset >= buffer.length * 8) return 0;
+    return (buffer[offset >>> 3] >>> (7 - (offset & 7))) & 1;
+  }
+
+  /**
+   * Replace the whole bit map, mirroring RedisBackend.replaceBits.
+   *
+   * The buffer is rebuilt from scratch, so a bit left over from an earlier,
+   * larger filter does not survive - which is what makes a rebuilt filter
+   * exact rather than merely a superset.
+   */
+  replace(key, offsets) {
+    if (offsets.length === 0) {
+      this.buffers.delete(key);
+      return;
+    }
+    let highest = 0;
+    for (const offset of offsets) if (offset > highest) highest = offset;
+    const buffer = new Uint8Array(Math.ceil((highest + 1) / 8));
+    for (const offset of offsets) {
+      // MSB first, matching Redis: a filter built by either backend can then
+      // be read by the other.
+      buffer[offset >>> 3] |= 0x80 >> (offset & 7);
+    }
+    this.buffers.set(key, buffer);
   }
 }
 
@@ -206,6 +306,14 @@ class MemoryBackend {
 
   async setBit(key, offset) {
     this.bits.setBit(key, offset);
+  }
+
+  async setBits(key, offsets) {
+    for (const offset of offsets) this.bits.setBit(key, offset);
+  }
+
+  async replaceBits(key, offsets) {
+    this.bits.replace(key, offsets);
   }
 
   async getBits(key, offsets) {

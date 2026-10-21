@@ -62,40 +62,49 @@ router.get(
       cities.map(async (cityCode) => {
         const { hot, hist } = schemasFor(cityCode);
         const pool = getPoolForCity(cityCode);
-        const [matrix, reservations, donations, transfusions] = await Promise.all([
-          pool.query(
-            `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
+        // One connection for all four aggregates. node-postgres queues queries
+        // on a single client anyway, so this costs nothing in latency - but it
+        // stops one dashboard request from holding four slots of a three-deep
+        // city pool and starving every other request on that shard.
+        const client = await pool.connect();
+        try {
+          const [matrix, reservations, donations, transfusions] = await Promise.all([
+            client.query(
+              `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
                     component_type::text AS "componentType", status::text AS status,
                     count(*)::int AS count
-             FROM ${hot}.blood_units
-             WHERE ($1::uuid IS NULL OR blood_bank_id = $1)
-             GROUP BY 1, 2, 3, 4`,
-            [bankId],
-          ),
-          pool.query(
-            `SELECT r.status::text AS status, r.urgency::text AS urgency, count(*)::int AS count
-             FROM ${hot}.reservations r
-             JOIN ${hot}.blood_units u ON u.unit_id = r.unit_id
-             WHERE ($1::uuid IS NULL OR u.blood_bank_id = $1)
-             GROUP BY 1, 2`,
-            [bankId],
-          ),
-          pool.query(
-            `SELECT count(*)::int AS count
-             FROM ${hist}.donations
-             WHERE collected_at >= now() - interval '30 days'
-               AND ($1::uuid IS NULL OR blood_bank_id = $1)`,
-            [bankId],
-          ),
-          pool.query(
-            `SELECT count(*)::int AS count
-             FROM ${hist}.transfusions
-             WHERE transfused_at >= now() - interval '30 days'
-               AND ($1::uuid IS NULL OR hospital_id IS NOT NULL)`,
-            [],
-          ),
-        ]);
-        return { cityCode, matrix, reservations, donations, transfusions };
+               FROM ${hot}.blood_units
+               WHERE ($1::uuid IS NULL OR blood_bank_id = $1)
+               GROUP BY 1, 2, 3, 4`,
+              [bankId],
+            ),
+            client.query(
+              `SELECT r.status::text AS status, r.urgency::text AS urgency, count(*)::int AS count
+               FROM ${hot}.reservations r
+               JOIN ${hot}.blood_units u ON u.unit_id = r.unit_id
+               WHERE ($1::uuid IS NULL OR u.blood_bank_id = $1)
+               GROUP BY 1, 2`,
+              [bankId],
+            ),
+            client.query(
+              `SELECT count(*)::int AS count
+               FROM ${hist}.donations
+               WHERE collected_at >= now() - interval '30 days'
+                 AND ($1::uuid IS NULL OR blood_bank_id = $1)`,
+              [bankId],
+            ),
+            client.query(
+              `SELECT count(*)::int AS count
+               FROM ${hist}.transfusions
+               WHERE transfused_at >= now() - interval '30 days'
+                 AND ($1::uuid IS NULL OR hospital_id IS NOT NULL)`,
+              [],
+            ),
+          ]);
+          return { cityCode, matrix, reservations, donations, transfusions };
+        } finally {
+          client.release();
+        }
       }),
     );
 

@@ -16,9 +16,14 @@ export async function sweepCity(cityCode) {
   try {
     const flag = await getChaosFlag(cityCode);
     if (flag.primaryDown) return { skipped: "SIMULATED_PRIMARY_DOWN" };
+    // Check the outage flag BEFORE taking a city connection. The flag lives on
+    // the catalog node, so reading it inside the city transaction needs a
+    // second connection while the first is held - which would put the catalog
+    // pool on the critical path of every city write. The flag is a simulated
+    // outage toggle, so a read outside the transaction is acceptable.
+    await assertCityWritable(cityCode);
     const withSerializableRetry = withSerializableRetryFor(getPoolForCity(cityCode));
     const result = await withSerializableRetry(async (client) => {
-      await assertCityWritable(client, cityCode);
       const expiredHolds = await client.query(
         `SELECT r.reservation_id, r.unit_id, u.expiry_date
          FROM ${hot}.reservations r
@@ -139,10 +144,13 @@ export async function runMaintenanceOnce() {
 
 export async function applyReplicaBatch(cityCode, limit = REPLICA_BATCH_SIZE) {
   const { hot, read } = schemasFor(cityCode);
+  // Read the outage flag BEFORE acquiring a city connection: holding a pool
+  // slot across a catalog round trip would take one of the three slots on
+  // every city pool, every second.
+  const flags = await getChaosFlag(cityCode);
+  if (flags.replicaDown) return { applied: 0, skipped: "SIMULATED_REPLICA_DOWN" };
   const client = await connectWithRetryFor(getPoolForCity(cityCode))();
   try {
-    const flags = await getChaosFlag(cityCode);
-    if (flags.replicaDown) return { applied: 0, skipped: "SIMULATED_REPLICA_DOWN" };
     await client.query("BEGIN");
 
     await client.query(

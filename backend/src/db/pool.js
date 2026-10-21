@@ -19,8 +19,15 @@ const CONNECTION_RETRY_CODES = new Set([
  * Why a factory: in distributed mode every node is a separate PostgreSQL
  * instance, so each needs its own pool. The single-node path just calls this
  * once and behaves exactly as before.
+ *
+ * Why the default pool size is small: distributed mode creates one pool per
+ * node (1 catalog + 10 cities) per backend instance. At the old default of 10
+ * that was 110 connections for a single instance - more than PostgreSQL's
+ * default max_connections=100 - and up to 330 with three workers behind the
+ * proxy. Callers that need a different depth pass it explicitly; see
+ * backend/src/db/registry.js.
  */
-export function createPool(connectionString, { max = 10, label = "default" } = {}) {
+export function createPool(connectionString, { max = env.db.poolMaxCity, label = "default" } = {}) {
   if (!connectionString) {
     throw new Error(`Cannot create pool "${label}": no connection string configured.`);
   }

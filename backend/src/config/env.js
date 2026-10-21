@@ -104,6 +104,27 @@ export const env = Object.freeze({
   instanceId: process.env.INSTANCE_ID || randomUUID(),
   frontendDist: new URL("../../../frontend/dist/", import.meta.url),
 
+  // ── Connection pools ────────────────────────────────────────────────────
+  // Distributed mode opens one pool per node: 1 catalog + 10 cities = 11 pools
+  // per backend instance. The defaults below cap an instance at 33 connections,
+  // which fits inside PostgreSQL's default max_connections=100 even when three
+  // worker instances run behind the proxy (99 total). Raising these is the
+  // first knob to turn if a node is the bottleneck, but the ceiling is
+  // max_connections on the server, not the pool size here.
+  db: Object.freeze({
+    // Per-city pools. Three leaves room for the two background jobs that
+    // overlap on every city pool (the 30s sweep and the 1s replica applier)
+    // plus one slot for request traffic.
+    poolMaxCity: numberFromEnv("DB_POOL_MAX_CITY", 3, { min: 1, max: 50 }),
+    // The catalog pool serves one lookup per authenticated request, so it is
+    // the hottest pool in the system despite being a single pool.
+    poolMaxCatalog: numberFromEnv("DB_POOL_MAX_CATALOG", 3, { min: 1, max: 50 }),
+    // In single mode every lookup resolves to ONE pool, and the fan-out routes
+    // (stats/overview runs four aggregates per city) hit it concurrently, so
+    // that pool needs to be much deeper than a per-city pool.
+    poolMaxSingle: numberFromEnv("DB_POOL_MAX_SINGLE", 10, { min: 1, max: 100 }),
+  }),
+
   // ── Cache / Bloom filter ────────────────────────────────────────────────
   // Every value here is optional. With no REDIS_URL the process falls back to a
   // bounded in-memory cache and the Bloom filters degrade to exact in-memory

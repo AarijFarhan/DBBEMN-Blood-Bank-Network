@@ -125,9 +125,7 @@ export async function addToFilter(kind, cityCode, id) {
   if (!env.bloom.enabled) return;
   try {
     const key = cacheKey(filterKey(kind, cityCode));
-    for (const offset of offsetsFor(String(id), SIZING)) {
-      await backendForBits().setBit(key, offset);
-    }
+    await backendForBits().setBits(key, offsetsFor(String(id), SIZING));
     await bumpEpoch(kind, cityCode);
   } catch (error) {
     log.warn({ err: error.message, kind, city: cityCode }, "bloom insert failed; untrusting filter");
@@ -140,11 +138,14 @@ export async function addManyToFilter(kind, cityCode, ids) {
   try {
     const key = cacheKey(filterKey(kind, cityCode));
     const bits = backendForBits();
+    // Collect every offset first and write the filter in one bulk replace.
+    // Setting them one at a time meant one network round trip per bit on the
+    // Redis backend, which turned a bulk rebuild into minutes of waiting.
+    const offsets = [];
     for (const id of ids) {
-      for (const offset of offsetsFor(String(id), SIZING)) {
-        await bits.setBit(key, offset);
-      }
+      offsets.push(...offsetsFor(String(id), SIZING));
     }
+    await bits.replaceBits(key, offsets);
     await bumpEpoch(kind, cityCode);
   } catch (error) {
     log.warn({ err: error.message, kind, city: cityCode }, "bloom bulk insert failed; untrusting filter");

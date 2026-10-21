@@ -135,9 +135,12 @@ export async function assertCityWritable(clientOrCity, cityArgument) {
   }
 }
 
-export async function measureReplicaLagMs(cityCode) {
+export async function measureReplicaLagMs(cityCode, client) {
   const { hot, read } = schemasFor(cityCode);
-  const result = await getPoolForCity(cityCode).query(
+  const run = client
+    ? (text) => client.query(text)
+    : (text) => getPoolForCity(cityCode).query(text);
+  const result = await run(
     `SELECT COALESCE(
        ceil(EXTRACT(EPOCH FROM (now() - min(o.created_at))) * 1000),
        0
