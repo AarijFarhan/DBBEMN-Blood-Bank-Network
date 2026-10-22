@@ -69,13 +69,21 @@ class MemoryStore {
     }
   }
 
+  has(key) {
+    return this.map.has(key);
+  }
+
   delete(key) {
     this.map.delete(key);
   }
 
   incr(key) {
+    return this.incrBy(key, 1);
+  }
+
+  incrBy(key, delta) {
     const current = Number(this.get(key) ?? 0);
-    const next = current + 1;
+    const next = current + delta;
     this.set(key, String(next), 0);
     return next;
   }
@@ -133,8 +141,45 @@ class RedisBackend {
     await this.client.del(key);
   }
 
+  /**
+   * SET with NX: only set when the key is absent.
+   *
+   * Returns true when this caller created the key, false when it was already
+   * there. Redis decides that atomically, which is what makes it usable as a
+   * lock across processes.
+   */
+  async setIfAbsent(key, value, ttlSeconds) {
+    const result =
+      ttlSeconds > 0
+        ? await this.client.set(key, value, "EX", Math.ceil(ttlSeconds), "NX")
+        : await this.client.set(key, value, "NX");
+    return result === "OK";
+  }
+
+  /**
+   * Delete only when the stored value still matches.
+   *
+   * A Lua script, because GET-then-DEL is two round trips and a window in
+   * between: the lock could expire in that window and be re-taken, and then a
+   * plain DEL would release someone else's lock.
+   */
+  async deleteIfValue(key, expected) {
+    const result = await this.client.eval(
+      "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+      1,
+      key,
+      expected,
+    );
+    return Number(result) === 1;
+  }
+
   async incr(key) {
     return this.client.incr(key);
+  }
+
+  /** Atomic increment by an arbitrary delta. Negative deltas are allowed. */
+  async incrBy(key, delta) {
+    return this.client.incrby(key, delta);
   }
 
   async setBit(key, offset) {
@@ -300,8 +345,24 @@ class MemoryBackend {
     this.store.delete(key);
   }
 
+  async setIfAbsent(key, value, ttlSeconds) {
+    if (this.store.has(key)) return false;
+    this.store.set(key, value, ttlSeconds);
+    return true;
+  }
+
+  async deleteIfValue(key, expected) {
+    if (this.store.get(key) !== expected) return false;
+    this.store.delete(key);
+    return true;
+  }
+
   async incr(key) {
     return this.store.incr(key);
+  }
+
+  async incrBy(key, delta) {
+    return this.store.incrBy(key, delta);
   }
 
   async setBit(key, offset) {
@@ -423,6 +484,40 @@ export async function cacheDelete(key) {
     await backend.del(fullKey(key));
   } catch (error) {
     log.debug({ err: error.message, key }, "cache delete failed");
+  }
+}
+
+/**
+ * Set a key only if it does not exist yet.
+ *
+ * This is the primitive behind the single-flight lock: exactly one caller
+ * gets `true`, everyone else gets `false`. Returns false on any error - a
+ * lock that cannot be taken must not look like one that was taken.
+ */
+export async function cacheSetIfAbsent(key, value, ttlSeconds) {
+  if (mode === "off") return false;
+  try {
+    return (await backend.setIfAbsent(fullKey(key), value, ttlSeconds)) === true;
+  } catch (error) {
+    log.debug({ err: error.message, key }, "cache set-if-absent failed");
+    return false;
+  }
+}
+
+/**
+ * Delete a key only if it still holds the expected value.
+ *
+ * A lock that has expired may already have been taken by someone else, and
+ * deleting it then would hand two callers the same lock. Comparing the value
+ * first makes the release safe.
+ */
+export async function cacheDeleteIfValue(key, expected) {
+  if (mode === "off") return false;
+  try {
+    return (await backend.deleteIfValue(fullKey(key), expected)) === true;
+  } catch (error) {
+    log.debug({ err: error.message, key }, "cache compare-and-delete failed");
+    return false;
   }
 }
 

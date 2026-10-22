@@ -4,7 +4,14 @@ import { getCatalogPool, getPoolForCity } from "../db/registry.js";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { AppError } from "../middleware/errors.js";
 import { getChaosFlags, measureReplicaLagMs } from "./chaos.js";
-import { buildKey, recall, remember } from "../cache/searchCache.js";
+import { buildKey, recall, remember, withSingleFlight } from "../cache/searchCache.js";
+import {
+  isSharedReady,
+  sharedDelete,
+  sharedExpire,
+  sharedHashGetAll,
+  sharedHashSet,
+} from "../cache/shared.js";
 import { logger } from "../lib/logger.js";
 
 const log = logger.child({ module: "search" });
@@ -438,35 +445,90 @@ function getBreaker(cityCode) {
   return state;
 }
 
-function canRead(cityCode) {
-  const state = circuitBreakers.get(cityCode);
+/**
+ * Circuit breaker state, shared between instances.
+ *
+ * The breaker used to live in a Map, which meant a shard that was failing for
+ * one instance was still being hammered by the other two - and each instance
+ * reported a different view of the network to the client. The state now lives
+ * in Redis so every instance sees the same breaker.
+ *
+ * A short-lived local mirror keeps the hot path (one check per shard per
+ * request) off the network. Writes always read the shared state fresh, so a
+ * burst of failures cannot hide behind the mirror.
+ */
+const BREAKER_MEMO_MS = 200;
+const BREAKER_TTL_SECONDS = 120;
+const breakerMemo = new Map();
+
+function breakerName(cityCode) {
+  return `breaker:search:${cityCode}`;
+}
+
+async function readBreaker(cityCode, fresh = false) {
+  if (!fresh) {
+    const memo = breakerMemo.get(cityCode);
+    if (memo && Date.now() - memo.at < BREAKER_MEMO_MS) return memo.state;
+  }
+  let state;
+  if (isSharedReady()) {
+    const hash = await sharedHashGetAll(breakerName(cityCode));
+    state = { failures: Number(hash.failures ?? 0), openUntil: Number(hash.openUntil ?? 0) };
+  } else {
+    state = circuitBreakers.get(cityCode) ?? { failures: 0, openUntil: 0, halfOpen: false };
+  }
+  breakerMemo.set(cityCode, { state, at: Date.now() });
+  return state;
+}
+
+async function writeBreaker(cityCode, state) {
+  breakerMemo.set(cityCode, { state, at: Date.now() });
+  if (!isSharedReady()) {
+    circuitBreakers.set(cityCode, state);
+    return;
+  }
+  await sharedHashSet(breakerName(cityCode), "failures", state.failures);
+  await sharedHashSet(breakerName(cityCode), "openUntil", state.openUntil);
+  // The TTL is what retires a breaker for a shard that stopped failing: no
+  // instance has to remember to close it.
+  await sharedExpire(breakerName(cityCode), BREAKER_TTL_SECONDS);
+}
+
+async function canRead(cityCode) {
+  const state = await readBreaker(cityCode);
   if (!state || state.openUntil === 0) return true;
   if (Date.now() < state.openUntil) return false;
-  state.halfOpen = true;
+  // The open window has passed: let one read through as a probe.
   return true;
 }
 
-function markReadSuccess(cityCode) {
-  circuitBreakers.delete(cityCode);
+async function markReadSuccess(cityCode) {
+  breakerMemo.delete(cityCode);
+  if (isSharedReady()) await sharedDelete(breakerName(cityCode));
+  else circuitBreakers.delete(cityCode);
 }
 
-function markFailure(cityCode) {
-  const state = getBreaker(cityCode);
-  state.failures += 1;
-  if (state.halfOpen || state.failures >= FAILURE_THRESHOLD) {
-    state.failures = FAILURE_THRESHOLD;
-    state.openUntil = Date.now() + HALF_OPEN_AFTER_MS;
-    state.halfOpen = false;
+async function markFailure(cityCode) {
+  const state = await readBreaker(cityCode, true);
+  const halfOpen = state.openUntil !== 0 && Date.now() >= state.openUntil;
+  const failures = state.failures + 1;
+  const shouldOpen = halfOpen || failures >= FAILURE_THRESHOLD;
+  await writeBreaker(cityCode, {
+    failures: shouldOpen ? FAILURE_THRESHOLD : failures,
+    openUntil: shouldOpen ? Date.now() + HALF_OPEN_AFTER_MS : 0,
+  });
+}
+
+async function markPrimarySuccess(cityCode) {
+  const state = await readBreaker(cityCode, true);
+  if (state.openUntil === 0 && state.failures !== 0) {
+    await writeBreaker(cityCode, { failures: 0, openUntil: 0 });
   }
-}
-
-function markPrimarySuccess(cityCode) {
-  const state = circuitBreakers.get(cityCode);
-  if (state && state.openUntil === 0) state.failures = 0;
 }
 
 export function resetSearchCircuitBreakers() {
   circuitBreakers.clear();
+  breakerMemo.clear();
 }
 
 function timeoutError() {
@@ -493,22 +555,22 @@ async function withShardTimeout(task, deadline) {
 
 async function runShard(cityCode, flag, queryForSource) {
   const deadline = Date.now() + env.searchShardTimeoutMs;
-  if (!flag.replicaDown && canRead(cityCode)) {
+  if (!flag.replicaDown && (await canRead(cityCode))) {
     try {
       const result = await withShardTimeout(() => queryForSource(cityCode, "replica"), deadline);
-      markReadSuccess(cityCode);
+      await markReadSuccess(cityCode);
       return { result, source: "SIMULATED_REPLICA" };
     } catch {
-      markFailure(cityCode);
+      await markFailure(cityCode);
     }
   }
   if (flag.primaryDown) throw new ShardUnavailableError(cityCode);
   try {
     const result = await withShardTimeout(() => queryForSource(cityCode, "primary"), deadline);
-    markPrimarySuccess(cityCode);
+    await markPrimarySuccess(cityCode);
     return { result, source: "PRIMARY_FALLBACK" };
   } catch {
-    markFailure(cityCode);
+    await markFailure(cityCode);
     throw new ShardUnavailableError(cityCode);
   }
 }
@@ -756,55 +818,67 @@ export async function searchUnits(input) {
     return { ...cached, cache: { status: "HIT" } };
   }
 
-  const scattered = await scatterGather(query.cities, flags, async (cityCode, source) =>
-    sourceQueryForCity(cityCode, query, source, origin, cursor, context));
-  const units = [];
-  const seen = new Set();
-  for (const response of scattered.responses) {
-    for (const row of response.result) {
-      if (seen.has(row.unitId)) continue;
-      seen.add(row.unitId);
-      units.push(mapUnit(row, response.cityCode));
-    }
-  }
-  units.sort((left, right) => compareUnits(left, right, query));
-  const page = units.slice(0, query.limit);
-  const { directory, degraded } = await loadBankDirectory(page.map((unit) => unit.bloodBankId));
-  for (const unit of page) {
-    const bank = directory.get(unit.bloodBankId);
-    if (bank) {
-      unit.bankName = bank.name;
-      unit.cityName = bank.cityName;
-    }
-  }
-  const lastUnit = page.at(-1);
-  // A unit with no value for the sort key cannot be expressed as a cursor
-  // position: the SQL predicate compares the sort value, and a NULL never
-  // compares true, so the next page could not be built from it anyway.
-  // Emitting a cursor would hand the client a token that fails to decode, so
-  // the page is ended here instead and the caller is told why.
-  const cursorable = lastUnit && !isMissing(orderValue(lastUnit, query));
-  const nextCursor = units.length > query.limit && cursorable
-    ? encodeSearchCursor({ ...cursorValue(lastUnit, query.sortBy), fingerprint, sortBy: query.sortBy, order: query.order })
-    : null;
-  const source = sourceForResponses(scattered.responses, flags, query.cities);
-  const meta = makeMeta(query.cities, scattered.responses, scattered.unavailableCities, flags, source);
-  if (degraded) meta.warnings.push("BANK_DIRECTORY_UNAVAILABLE");
-  if (!cursorable && units.length > query.limit) meta.warnings.push("CURSOR_STOPPED_AT_MISSING_SORT_VALUE");
-  meta.replicaLagMs = await collectLags(query.cities);
-  const result = { units: page, nextCursor, meta };
+  // Single-flight: a key that a dozen clients miss at once is computed once,
+  // not a dozen times. Each of those computations is a scatter-gather across
+  // every shard, so the stampede lands on the database exactly when it is
+  // already busy.
+  const { value, fromCache } = await withSingleFlight(
+    cacheKey,
+    { cities: query.cities, flags },
+    async () => {
+      const scattered = await scatterGather(query.cities, flags, async (cityCode, source) =>
+        sourceQueryForCity(cityCode, query, source, origin, cursor, context));
+      const units = [];
+      const seen = new Set();
+      for (const response of scattered.responses) {
+        for (const row of response.result) {
+          if (seen.has(row.unitId)) continue;
+          seen.add(row.unitId);
+          units.push(mapUnit(row, response.cityCode));
+        }
+      }
+      units.sort((left, right) => compareUnits(left, right, query));
+      const page = units.slice(0, query.limit);
+      const { directory, degraded } = await loadBankDirectory(page.map((unit) => unit.bloodBankId));
+      for (const unit of page) {
+        const bank = directory.get(unit.bloodBankId);
+        if (bank) {
+          unit.bankName = bank.name;
+          unit.cityName = bank.cityName;
+        }
+      }
+      const lastUnit = page.at(-1);
+      // A unit with no value for the sort key cannot be expressed as a cursor
+      // position: the SQL predicate compares the sort value, and a NULL never
+      // compares true, so the next page could not be built from it anyway.
+      // Emitting a cursor would hand the client a token that fails to decode, so
+      // the page is ended here instead and the caller is told why.
+      const cursorable = lastUnit && !isMissing(orderValue(lastUnit, query));
+      const nextCursor = units.length > query.limit && cursorable
+        ? encodeSearchCursor({ ...cursorValue(lastUnit, query.sortBy), fingerprint, sortBy: query.sortBy, order: query.order })
+        : null;
+      const source = sourceForResponses(scattered.responses, flags, query.cities);
+      const meta = makeMeta(query.cities, scattered.responses, scattered.unavailableCities, flags, source);
+      if (degraded) meta.warnings.push("BANK_DIRECTORY_UNAVAILABLE");
+      if (!cursorable && units.length > query.limit) meta.warnings.push("CURSOR_STOPPED_AT_MISSING_SORT_VALUE");
+      meta.replicaLagMs = await collectLags(query.cities);
+      const result = { units: page, nextCursor, meta };
 
-  if (cacheKey) {
-    await remember(cacheKey, result, {
-      cities: query.cities,
-      flags,
-      // Any missing shard means this answer is a subset of reality. Caching it
-      // would keep hiding real stock after the shard recovered.
-      complete: scattered.unavailableCities.length === 0,
-      ttlSeconds: env.cache.searchTtlSeconds,
-    });
-  }
-  return { ...result, cache: { status: "MISS" } };
+      if (cacheKey) {
+        await remember(cacheKey, result, {
+          cities: query.cities,
+          flags,
+          // Any missing shard means this answer is a subset of reality. Caching it
+          // would keep hiding real stock after the shard recovered.
+          complete: scattered.unavailableCities.length === 0,
+          ttlSeconds: env.cache.searchTtlSeconds,
+        });
+      }
+      return result;
+    },
+  );
+
+  return { ...value, cache: { status: fromCache ? "HIT" : "MISS" } };
 }
 
 async function sourceQueryForCity(cityCode, query, source, origin, cursor, context) {
@@ -826,43 +900,53 @@ export async function stockSummary(input) {
     return { ...cached, cache: { status: "HIT" } };
   }
 
-  const scattered = await scatterGather(query.cities, flags, async (cityCode, source) => {
-    const statement = buildSummarySql(cityCode, source, query, context);
-    const result = await getPoolForCity(cityCode).query(statement.text, statement.values);
-    return result.rows;
-  });
-  const summary = [];
-  for (const response of scattered.responses) {
-    for (const row of response.result) {
-      summary.push({
-        cityCode: response.cityCode,
-        bloodGroup: row.bloodGroup,
-        rh: row.rhFactor,
-        rhFactor: row.rhFactor,
-        component: row.componentType,
-        componentType: row.componentType,
-        count: Number(row.count),
+  // Single-flight, same as the search path: one scatter-gather per key, no
+  // matter how many clients ask for it at once.
+  const { value, fromCache } = await withSingleFlight(
+    cacheKey,
+    { cities: query.cities, flags },
+    async () => {
+      const scattered = await scatterGather(query.cities, flags, async (cityCode, source) => {
+        const statement = buildSummarySql(cityCode, source, query, context);
+        const result = await getPoolForCity(cityCode).query(statement.text, statement.values);
+        return result.rows;
       });
-    }
-  }
-  const source = sourceForResponses(scattered.responses, flags, query.cities);
-  const meta = makeMeta(query.cities, scattered.responses, scattered.unavailableCities, flags, source);
-  meta.replicaLagMs = await collectLags(query.cities);
-  const byCity = Object.fromEntries(query.cities.map((cityCode) => [
-    cityCode,
-    summary.filter((row) => row.cityCode === cityCode),
-  ]));
-  const result = { summary, counts: summary, byCity, meta };
+      const summary = [];
+      for (const response of scattered.responses) {
+        for (const row of response.result) {
+          summary.push({
+            cityCode: response.cityCode,
+            bloodGroup: row.bloodGroup,
+            rh: row.rhFactor,
+            rhFactor: row.rhFactor,
+            component: row.componentType,
+            componentType: row.componentType,
+            count: Number(row.count),
+          });
+        }
+      }
+      const source = sourceForResponses(scattered.responses, flags, query.cities);
+      const meta = makeMeta(query.cities, scattered.responses, scattered.unavailableCities, flags, source);
+      meta.replicaLagMs = await collectLags(query.cities);
+      const byCity = Object.fromEntries(query.cities.map((cityCode) => [
+        cityCode,
+        summary.filter((row) => row.cityCode === cityCode),
+      ]));
+      const result = { summary, counts: summary, byCity, meta };
 
-  if (cacheKey) {
-    await remember(cacheKey, result, {
-      cities: query.cities,
-      flags,
-      // A per-city count that silently omits a down shard is a lie a caller
-      // cannot detect, so it must never be served from cache.
-      complete: scattered.unavailableCities.length === 0,
-      ttlSeconds: env.cache.summaryTtlSeconds,
-    });
-  }
-  return { ...result, cache: { status: "MISS" } };
+      if (cacheKey) {
+        await remember(cacheKey, result, {
+          cities: query.cities,
+          flags,
+          // A per-city count that silently omits a down shard is a lie a caller
+          // cannot detect, so it must never be served from cache.
+          complete: scattered.unavailableCities.length === 0,
+          ttlSeconds: env.cache.summaryTtlSeconds,
+        });
+      }
+      return result;
+    },
+  );
+
+  return { ...value, cache: { status: fromCache ? "HIT" : "MISS" } };
 }

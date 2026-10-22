@@ -12,7 +12,7 @@ import { schemasFor } from "../db/shard-router.js";
 import { assertCityWritable } from "../services/chaos.js";
 import { createTokenPair, hashRefreshToken } from "../utils/tokens.js";
 import { revokeAccessToken } from "../cache/revocations.js";
-import { KIND, rememberCreated } from "../services/presence.js";
+import { KIND, cancelCreated, noteCreated, rememberCreated } from "../services/presence.js";
 import { loginSchema, refreshSchema, registerDonorSchema } from "../utils/validators.js";
 
 const router = Router();
@@ -49,26 +49,36 @@ router.post(
     const { hist } = schemasFor(body.cityCode);
     const passwordHash = await bcrypt.hash(body.password, 12);
 
-    await withSerializableRetryFor(getPoolForCity(body.cityCode))(async (client) => {
-      await assertCityWritable(client, body.cityCode);
-      return client.query(
-        `INSERT INTO ${hist}.donors
-           (donor_id, full_name, phone, date_of_birth, sex, weight_kg,
-            blood_group, rh_factor, city_code, is_available)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE)`,
-        [
-          donorId,
-          body.fullName,
-          body.phone,
-          body.dateOfBirth,
-          body.sex,
-          body.weightKg,
-          body.bloodGroup,
-          body.rhFactor,
-          body.cityCode,
-        ],
-      );
-    });
+    // Retire the presence filter *before* the row is committed. A lookup that
+    // runs between the commit and the filter update would otherwise skip this
+    // city and 404 a donor that was just registered.
+    await noteCreated(KIND.DONOR, body.cityCode);
+    try {
+      await withSerializableRetryFor(getPoolForCity(body.cityCode))(async (client) => {
+        await assertCityWritable(client, body.cityCode);
+        return client.query(
+          `INSERT INTO ${hist}.donors
+             (donor_id, full_name, phone, date_of_birth, sex, weight_kg,
+              blood_group, rh_factor, city_code, is_available)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE)`,
+          [
+            donorId,
+            body.fullName,
+            body.phone,
+            body.dateOfBirth,
+            body.sex,
+            body.weightKg,
+            body.bloodGroup,
+            body.rhFactor,
+            body.cityCode,
+          ],
+        );
+      });
+    } catch (error) {
+      // The row was never created, so the intent has to be settled without a bit.
+      await cancelCreated(KIND.DONOR, body.cityCode);
+      throw error;
+    }
 
     // Index the new donor so cross-shard donor lookups can skip this city's
     // shard. After the commit, because a filter entry for a row that does not

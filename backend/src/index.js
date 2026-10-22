@@ -4,6 +4,8 @@ import { logger } from "./lib/logger.js";
 import { allCityPools, describeTopology, getCatalogPool, waitForDatabases } from "./db/registry.js";
 import { startBackgroundJobs } from "./jobs/maintenance.js";
 import { closeCache, initCache } from "./cache/store.js";
+import { closeShared, initShared } from "./cache/shared.js";
+import { initEventBus } from "./lib/bus.js";
 import { PRESENCE_LOADERS, rebuildAllPresenceFilters } from "./services/presence.js";
 import { describeSizing } from "./cache/bloom.js";
 
@@ -15,6 +17,14 @@ logger.info({ topology: describeTopology(), reachable: healthy }, "database topo
 // rather than refusing to start.
 const cacheMode = await initCache();
 logger.info({ cacheMode, bloom: describeSizing() }, "cache ready");
+
+// Shared state (circuit breakers, event fan-out) lives in Redis too, but it is
+// optional in a way the cache is not: without it the breakers fall back to
+// per-process state and the event feed stays local. Both are degraded, not
+// broken, so a missing Redis must not stop the process from serving.
+const sharedMode = await initShared();
+const busMode = initEventBus();
+logger.info({ sharedMode, busMode }, "shared state ready");
 
 // Rebuild presence filters at boot so cross-shard lookups can narrow on the first
 // request. Best-effort and never fatal — an unbuilt filter is a full scan, which
@@ -42,6 +52,7 @@ async function shutdown(signal) {
     const closers = [getCatalogPool(), ...allCityPools().map((entry) => entry.pool)];
     await Promise.allSettled([...new Set(closers)].map((pool) => pool.end()));
     await closeCache();
+    await closeShared();
     process.exit(0);
   });
   setTimeout(() => process.exit(1), 10000).unref();

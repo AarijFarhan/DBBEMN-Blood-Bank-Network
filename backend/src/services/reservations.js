@@ -6,7 +6,7 @@ import { getPoolForCity } from "../db/registry.js";
 import { AppError } from "../middleware/errors.js";
 import { assertCityWritable } from "./chaos.js";
 import { invalidateCityInventory } from "../cache/store.js";
-import { KIND, rememberCreated } from "./presence.js";
+import { KIND, cancelCreated, noteCreated, rememberCreated } from "./presence.js";
 import { EVENT_TYPES, publish } from "../lib/bus.js";
 
 export { assertCityWritable };
@@ -100,7 +100,13 @@ async function createReservation(client, hot, request, cityCode, unit) {
 export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request);
-  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  // Retire the presence filter before the reservations are committed, so a
+  // lookup that runs in between cannot skip the shard that is about to hold
+  // them.
+  await noteCreated(KIND.RESERVATION, cityCode);
+  let result;
+  try {
+    result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const cached = await claimRequest(client, hot, request, requestHash);
     if (cached) return cached;
@@ -151,6 +157,11 @@ export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
     }
     throw error;
   });
+  } catch (error) {
+    // Nothing was committed, so the intent is settled without a bit.
+    await cancelCreated(KIND.RESERVATION, cityCode);
+    throw error;
+  }
 
   // Units just moved to RESERVED, so any cached search or summary that still
   // lists them as available is now showing stock that is spoken for. Bump only
@@ -158,9 +169,14 @@ export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
   if (result.reservations.length > 0) {
     await invalidateCityInventory(cityCode);
     // Index the new reservations so detail lookups can skip other shards.
-    // Best-effort: a failure here untrusts the filter rather than lying.
+    // Best-effort: a failure here untrusts the filter rather than lying. The
+    // reservations share one intent, so they are indexed together.
+    await rememberCreated(
+      KIND.RESERVATION,
+      cityCode,
+      result.reservations.map((reservation) => reservation.reservationId),
+    );
     for (const reservation of result.reservations) {
-      await rememberCreated(KIND.RESERVATION, cityCode, reservation.reservationId);
       publish(EVENT_TYPES.RESERVATION_CREATED, {
         cityCode,
         reservationId: reservation.reservationId,
@@ -179,7 +195,10 @@ export async function reserveUnitsInCity(cityCode, request, unitsNeeded) {
 export async function reserveSpecificUnit(cityCode, request, unitId) {
   const { hot } = schemasFor(cityCode);
   const requestHash = hashRequest(request, unitId);
-  const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+  await noteCreated(KIND.RESERVATION, cityCode);
+  let result;
+  try {
+    result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
     await assertCityWritable(client, cityCode);
     const cached = await claimRequest(client, hot, request, requestHash);
     if (cached) return cached;
@@ -233,11 +252,19 @@ export async function reserveSpecificUnit(cityCode, request, unitId) {
     }
     throw error;
   });
+  } catch (error) {
+    await cancelCreated(KIND.RESERVATION, cityCode);
+    throw error;
+  }
 
   if (result.reservations.length > 0) {
     await invalidateCityInventory(cityCode);
+    await rememberCreated(
+      KIND.RESERVATION,
+      cityCode,
+      result.reservations.map((reservation) => reservation.reservationId),
+    );
     for (const reservation of result.reservations) {
-      await rememberCreated(KIND.RESERVATION, cityCode, reservation.reservationId);
       publish(EVENT_TYPES.RESERVATION_CREATED, {
         cityCode,
         reservationId: reservation.reservationId,

@@ -13,7 +13,9 @@ import {
   candidateCities,
   describeSizing,
   mightContain,
+  noteWrite,
   rebuildFilter,
+  resolveWrite,
 } from "../src/cache/bloom.js";
 import { isAccessTokenRevoked, revokeAccessToken } from "../src/cache/revocations.js";
 import { buildKey, flagsSignature, recall, remember } from "../src/cache/searchCache.js";
@@ -199,6 +201,45 @@ test("an insert that lands after a rebuild keeps the filter usable", async () =>
     await mightContain("unit", "KHI", "unit-2"),
     true,
     "a record inserted after the rebuild must still be found, or the filter would 404 it",
+  );
+});
+
+test("a write in flight retires the filter, and absorbing it restores trust", async () => {
+  await rebuildFilter("donation", "ISB", []);
+
+  // A trusted empty filter is allowed to narrow the search.
+  const before = await candidateCities("donation", CITIES, "donation-x");
+  assert.ok(!before.includes("ISB"), "an empty trusted filter should skip the shard");
+
+  // The write intent is recorded before the commit, so the filter stops being
+  // trusted *before* the row becomes visible. Otherwise a lookup in that
+  // window would skip the shard that is about to hold the row.
+  await noteWrite("donation", "ISB");
+  const during = await candidateCities("donation", CITIES, "donation-x");
+  assert.ok(
+    during.includes("ISB"),
+    "a filter with a write in flight must not be trusted; skipping the shard could 404 the row",
+  );
+
+  // Once the write is absorbed, the filter is trusted again. A busy city must
+  // not lose its filter after the first write of any kind.
+  await resolveWrite("donation", "ISB");
+  const after = await candidateCities("donation", CITIES, "donation-x");
+  assert.ok(!after.includes("ISB"), "a filter that absorbed the write should be trusted again");
+});
+
+test("a write that is never absorbed keeps the filter retired", async () => {
+  await rebuildFilter("reservation", "LHE", []);
+
+  // A write intent that is never resolved is what a process that died between
+  // the commit and the filter update looks like. The filter must stay retired:
+  // the row may exist while the filter does not know about it.
+  await noteWrite("reservation", "LHE");
+
+  const candidates = await candidateCities("reservation", CITIES, "reservation-x");
+  assert.ok(
+    candidates.includes("LHE"),
+    "a filter that is missing an absorbed write must never skip the shard",
   );
 });
 

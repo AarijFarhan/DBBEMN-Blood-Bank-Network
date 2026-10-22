@@ -11,7 +11,7 @@ import { parseQuery, validate } from "../middleware/validate.js";
 import { getActiveBank } from "../services/catalog.js";
 import { assertCityWritable } from "../services/chaos.js";
 import { invalidateCityInventory } from "../cache/store.js";
-import { KIND, rememberCreated } from "../services/presence.js";
+import { KIND, cancelCreated, noteCreated, rememberCreated } from "../services/presence.js";
 import { EVENT_TYPES, publish } from "../lib/bus.js";
 import {
   cityCodeSchema,
@@ -67,7 +67,14 @@ router.post(
     const donationId = randomUUID();
     const unitIds = body.components.map(() => randomUUID());
 
-     const created = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
+    // Retire the presence filters before the rows are committed: a lookup that
+    // runs between the commit and the filter update would skip this city and
+    // 404 a donation or a unit that was just created.
+    await noteCreated(KIND.DONATION, cityCode);
+    await noteCreated(KIND.UNIT, cityCode);
+    let created;
+    try {
+      created = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
        await assertCityWritable(client, cityCode);
        const donorResult = await client.query(
         `SELECT donor_id, date_of_birth, weight_kg, last_donation_date,
@@ -136,15 +143,20 @@ router.post(
         units.push({ unitId, componentType: component.componentType, status: "QUARANTINE" });
       }
       return { donationId, cityCode, units };
-    });
+      });
+    } catch (error) {
+      // Nothing was committed, so both intents are settled without a bit.
+      await cancelCreated(KIND.DONATION, cityCode);
+      await cancelCreated(KIND.UNIT, cityCode);
+      throw error;
+    }
 
     // New rows must enter the presence index, otherwise a trusted filter rebuilt
     // earlier would not know about them. Best-effort by design: the failure mode
-    // is a full scan, never a missed record.
+    // is a full scan, never a missed record. The units share one intent, so
+    // they are indexed together.
     await rememberCreated(KIND.DONATION, cityCode, donationId);
-    for (const unit of created.units) {
-      await rememberCreated(KIND.UNIT, cityCode, unit.unitId);
-    }
+    await rememberCreated(KIND.UNIT, cityCode, created.units.map((unit) => unit.unitId));
     publish(EVENT_TYPES.DONATION_CREATED, {
       cityCode,
       donationId,

@@ -67,37 +67,124 @@ function trustedKey(kind, cityCode) {
 }
 
 /**
- * Per-filter mutation counter.
+ * Per-filter mutation counters.
  *
  * The trust marker alone cannot detect a *stale* filter: if a row commits while
  * the cache backend is unreachable, the insert never reaches the filter but the
  * marker still says "trusted", and a lookup would then wrongly skip the shard
  * that holds the new row.
  *
- * Every successful insert bumps this counter. The trust marker records the
- * counter value observed when the filter was built, so any insert the filter
- * missed is detectable. A mismatch invalidates trust, exactly like a failed
- * insert does.
+ * Three counters, and the difference between them is the whole point:
  *
- * Residual gap: a process that dies between COMMIT and the insert leaves the
- * counter un-bumped. That window is one cache call wide, and the operational
- * remedy is to rebuild presence filters on deploy and after a cache outage —
- * which `rebuildPresenceFilters` is for.
+ *  - `writes` counts write *intents*. It is bumped **before** the row is
+ *    committed, so the filter stops being trusted at the moment the write
+ *    starts - not after it finishes. A process that dies between the commit and
+ *    the filter update therefore leaves the filter visibly behind.
+ *  - `absorbed` counts writes the filter has caught up with. It is raised only
+ *    after the bits are actually in place.
+ *  - `pending` counts writes that are in flight right now: intent recorded, bits
+ *    not yet written.
+ *
+ * The filter is trusted while `absorbed === writes && pending === 0`. Both
+ * halves matter:
+ *
+ *  - `absorbed === writes` says every write that ever happened has been
+ *    indexed. Because absorbed counts *completions* rather than a watermark,
+ *    a writer that finishes late cannot make the filter claim to have absorbed
+ *    a write whose bits are not in it yet - the thing that would turn a
+ *    concurrent write into a false negative.
+ *  - `pending === 0` says nobody is mid-write, so the filter is not being read
+ *    while it is half updated.
+ *
+ * A write the filter absorbed keeps it trusted, so a busy city does not
+ * silently lose its filter after the first insert. A write the filter missed
+ * leaves the counts apart, which retires the filter and sends lookups back to
+ * a full scan.
+ *
+ * The earlier design bumped a single counter after every successful insert and
+ * compared it with a snapshot taken at build time. That made the filter
+ * untrusted after the first write of any kind - so in a live system the filter
+ * was never consulted - while still failing to catch the crash it was meant to
+ * catch, because the bump came after the insert rather than before the commit.
  */
-function epochKey(kind, cityCode) {
-  return `${filterKey(kind, cityCode)}:epoch`;
+function writesKey(kind, cityCode) {
+  return `${filterKey(kind, cityCode)}:writes`;
 }
 
-async function readEpoch(kind, cityCode) {
-  const raw = await cacheGet(epochKey(kind, cityCode));
-  return Number(raw ?? 0);
+function absorbedKey(kind, cityCode) {
+  return `${filterKey(kind, cityCode)}:absorbed`;
 }
 
-async function bumpEpoch(kind, cityCode) {
+function pendingKey(kind, cityCode) {
+  return `${filterKey(kind, cityCode)}:pending`;
+}
+
+async function readCounter(key) {
+  const raw = await cacheGet(key);
+  const value = Number(raw ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+export async function readWrites(kind, cityCode) {
+  return readCounter(writesKey(kind, cityCode));
+}
+
+export async function readAbsorbed(kind, cityCode) {
+  return readCounter(absorbedKey(kind, cityCode));
+}
+
+export async function readPending(kind, cityCode) {
+  return readCounter(pendingKey(kind, cityCode));
+}
+
+async function readCounters(kind, cityCode) {
+  const [writes, absorbed, pending] = await Promise.all([
+    readWrites(kind, cityCode),
+    readAbsorbed(kind, cityCode),
+    readPending(kind, cityCode),
+  ]);
+  return { writes, absorbed, pending };
+}
+
+/**
+ * Record a write intent.
+ *
+ * Called before the row is committed, so that the filter stops being trusted
+ * before the row becomes visible, and a crash between the commit and the
+ * filter insert is visible as `absorbed !== writes`.
+ */
+export async function noteWrite(kind, cityCode) {
+  if (!env.bloom.enabled) return 0;
   try {
-    await backendForBits().incr(cacheKey(epochKey(kind, cityCode)));
+    const bits = backendForBits();
+    const observed = Number((await bits.incrBy(cacheKey(writesKey(kind, cityCode)), 1)) ?? 0);
+    await bits.incrBy(cacheKey(pendingKey(kind, cityCode)), 1);
+    return observed;
   } catch (error) {
-    log.warn({ err: error.message, kind, city: cityCode }, "failed to bump presence epoch");
+    log.warn({ err: error.message, kind, city: cityCode }, "failed to record presence write");
+    return 0;
+  }
+}
+
+/**
+ * Settle a write intent.
+ *
+ * Called once the write is done and the bits are in place, and also when the
+ * write was rolled back: a row that was never committed needs no bit, so the
+ * intent is simply resolved.
+ */
+export async function resolveWrite(kind, cityCode) {
+  if (!env.bloom.enabled) return;
+  try {
+    const bits = backendForBits();
+    await bits.incrBy(cacheKey(absorbedKey(kind, cityCode)), 1);
+    // Clamp at zero: a counter that went negative would keep the filter
+    // untrusted forever, and an untrusted filter is a slow one, not a wrong
+    // one - but it is still a filter nobody consults.
+    const remaining = Number((await bits.incrBy(cacheKey(pendingKey(kind, cityCode)), -1)) ?? 0);
+    if (remaining < 0) await bits.set(cacheKey(pendingKey(kind, cityCode)), "0", 0);
+  } catch (error) {
+    log.warn({ err: error.message, kind, city: cityCode }, "failed to record absorbed presence writes");
   }
 }
 
@@ -116,40 +203,89 @@ export function describeSizing() {
 }
 
 /**
- * Record an id as present. Call this *after* the row is committed.
+ * Record one or more ids as present.
+ *
+ * Call this *after* the row is committed, and pair it with `resolveWrite` so
+ * the filter knows the write has been absorbed. The write intent must have
+ * been recorded with `noteWrite` before the commit.
  *
  * If this fails the filter must not be trusted, because the row now exists in
  * the table but not in the filter, and a lookup would wrongly skip the shard.
  */
-export async function addToFilter(kind, cityCode, id) {
+export async function addToFilter(kind, cityCode, ids) {
   if (!env.bloom.enabled) return;
+  const list = Array.isArray(ids) ? ids : [ids];
+  if (list.length === 0) return;
   try {
     const key = cacheKey(filterKey(kind, cityCode));
-    await backendForBits().setBits(key, offsetsFor(String(id), SIZING));
-    await bumpEpoch(kind, cityCode);
+    const offsets = [];
+    for (const id of list) {
+      offsets.push(...offsetsFor(String(id), SIZING));
+    }
+    await backendForBits().setBits(key, offsets);
   } catch (error) {
     log.warn({ err: error.message, kind, city: cityCode }, "bloom insert failed; untrusting filter");
     await clearTrusted(kind, cityCode);
   }
 }
 
-export async function addManyToFilter(kind, cityCode, ids) {
-  if (!env.bloom.enabled || ids.length === 0) return;
+/**
+ * Rebuild a filter from the authoritative table and mark it trusted.
+ *
+ * This is the only path that may set trust, which is what guarantees the
+ * no-false-negative property.
+ *
+ * `idsOrLoader` is either the ids themselves or a function that reads the
+ * table. Passing the loader matters: the table read happens *inside* the
+ * window in which the counters are compared, so a write that commits while
+ * the rebuild is running is seen as a write that overlapped, and the rebuild
+ * degrades to "add bits only" instead of replacing the filter.
+ */
+export async function rebuildFilter(kind, cityCode, idsOrLoader) {
+  if (!env.bloom.enabled) return { kind, cityCode, inserted: 0, trusted: false };
+  const loader = typeof idsOrLoader === "function" ? idsOrLoader : async () => idsOrLoader;
+  const before = await readCounters(kind, cityCode);
+  const ids = await loader();
+  const after = await readCounters(kind, cityCode);
+  // Quiet means: no write started, no write finished, and nobody is mid-write.
+  // Only then is it safe to replace the filter wholesale.
+  const quiet =
+    before.writes === after.writes &&
+    before.absorbed === after.absorbed &&
+    before.pending === 0 &&
+    after.pending === 0;
+
   try {
     const key = cacheKey(filterKey(kind, cityCode));
     const bits = backendForBits();
-    // Collect every offset first and write the filter in one bulk replace.
-    // Setting them one at a time meant one network round trip per bit on the
-    // Redis backend, which turned a bulk rebuild into minutes of waiting.
     const offsets = [];
     for (const id of ids) {
       offsets.push(...offsetsFor(String(id), SIZING));
     }
-    await bits.replaceBits(key, offsets);
-    await bumpEpoch(kind, cityCode);
+    if (quiet) {
+      // Safe to replace: nothing was written while the table was read, so the
+      // table is the whole truth. A bulk replace is also one round trip, where
+      // setting the bits one at a time was one round trip per bit.
+      await bits.replaceBits(key, offsets);
+      // Settle the counters. A write that was recorded but never completed - a
+      // process that died between the commit and the filter update - is settled
+      // here, because the table read is the authority on whether that row
+      // exists.
+      await cacheSet(absorbedKey(kind, cityCode), String(after.writes), 0);
+      await cacheSet(pendingKey(kind, cityCode), "0", 0);
+    } else {
+      // A write overlapped the rebuild. Only ever *add* bits: replacing would
+      // erase a row that another writer has already committed and indexed.
+      // The counters are left alone, so the filter stays untrusted until that
+      // write lands.
+      await bits.setBits(key, offsets);
+    }
+    await markTrusted(kind, cityCode);
+    return { kind, cityCode, inserted: ids.length, trusted: true };
   } catch (error) {
-    log.warn({ err: error.message, kind, city: cityCode }, "bloom bulk insert failed; untrusting filter");
+    log.warn({ err: error.message, kind, city: cityCode }, "bloom rebuild failed; untrusting filter");
     await clearTrusted(kind, cityCode);
+    return { kind, cityCode, inserted: 0, trusted: false };
   }
 }
 
@@ -157,15 +293,18 @@ export async function addManyToFilter(kind, cityCode, ids) {
  * Whether the filter can be consulted at all. An untrusted filter answers
  * "maybe" for everything, which is always safe but never faster.
  *
- * Trust requires both the marker *and* a matching epoch snapshot: the marker
- * says "built from the table", the epoch says "still in sync with it".
+ * Trust requires both the marker *and* a caught-up mutation count: the marker
+ * says "built from the table", and the counters say "still in sync with it".
  */
 async function isTrusted(kind, cityCode) {
   const marker = await cacheGet(trustedKey(kind, cityCode));
   if (marker !== "1") return false;
-  const builtAt = Number((await cacheGet(`${trustedKey(kind, cityCode)}:at`)) ?? 0);
-  if (builtAt !== (await readEpoch(kind, cityCode))) {
-    log.debug({ kind, city: cityCode }, "presence filter is stale; ignoring it");
+  const { absorbed, writes, pending } = await readCounters(kind, cityCode);
+  if (absorbed !== writes || pending !== 0) {
+    log.debug(
+      { kind, city: cityCode, absorbed, writes, pending },
+      "presence filter is stale; ignoring it",
+    );
     return false;
   }
   return true;
@@ -174,8 +313,6 @@ async function isTrusted(kind, cityCode) {
 async function markTrusted(kind, cityCode) {
   // No TTL: trust is revoked explicitly by clearTrusted(), not by expiry.
   await cacheSet(trustedKey(kind, cityCode), "1", 0);
-  // Snapshot the mutation counter this filter is now in sync with.
-  await cacheSet(`${trustedKey(kind, cityCode)}:at`, String(await readEpoch(kind, cityCode)), 0);
 }
 
 async function clearTrusted(kind, cityCode) {
@@ -218,19 +355,6 @@ export async function candidateCities(kind, cityCodes, id) {
     cityCodes.map((cityCode) => mightContain(kind, cityCode, id)),
   );
   return cityCodes.filter((_, index) => verdicts[index]);
-}
-
-/**
- * Rebuild a filter from the authoritative table and mark it trusted.
- * This is the only path that may set trust, which is what guarantees the
- * no-false-negative property.
- */
-export async function rebuildFilter(kind, cityCode, ids) {
-  if (!env.bloom.enabled) return { kind, cityCode, inserted: 0, trusted: false };
-  await clearTrusted(kind, cityCode);
-  await addManyToFilter(kind, cityCode, ids);
-  await markTrusted(kind, cityCode);
-  return { kind, cityCode, inserted: ids.length, trusted: true };
 }
 
 export { SIZING };

@@ -23,11 +23,13 @@
  * complete and the current topology matches. Anything interesting goes to
  * PostgreSQL.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
 import {
+  cacheDeleteIfValue,
   cacheGet,
   cacheSet,
+  cacheSetIfAbsent,
   inventoryVersions,
   isSharedCache,
   versionToken,
@@ -128,4 +130,61 @@ function warnOnceAboutSharedCache() {
 /** Whether cached results are visible to other instances. */
 export function sharedCacheRequired() {
   return isSharedCache();
+}
+
+/**
+ * How long the lock is held, and how long a caller waits for the winner.
+ *
+ * The lock outlives the work on purpose: if the instance holding it dies, the
+ * lock expires rather than blocking the key forever. The wait is short on
+ * purpose too - a caller that waits longer than the work takes is just adding
+ * latency, so it gives up and computes the answer itself.
+ */
+const SINGLE_FLIGHT_LOCK_SECONDS = 5;
+const SINGLE_FLIGHT_WAIT_MS = 300;
+const SINGLE_FLIGHT_POLL_MS = 20;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Run `work` once per cache key, even when many requests miss at the same time.
+ *
+ * Without this, a key that is popular enough to be requested by a dozen
+ * clients at once is computed a dozen times - every one of them a full
+ * scatter-gather across ten shards, against the same rows. The stampede is
+ * worst exactly when it hurts most: right after a write invalidates the key.
+ *
+ * The winner computes and caches the answer; the others wait briefly for that
+ * answer to appear and then serve it. A caller that waits out the window
+ * computes the answer itself rather than returning nothing.
+ */
+export async function withSingleFlight(key, options, work) {
+  if (!key || !env.cache.enabled) return { value: await work(), fromCache: false };
+
+  const lockKey = `lock:${key}`;
+  const token = randomUUID();
+  const acquired = await cacheSetIfAbsent(lockKey, token, SINGLE_FLIGHT_LOCK_SECONDS);
+
+  if (acquired) {
+    try {
+      return { value: await work(), fromCache: false };
+    } finally {
+      // Release only if the lock is still ours: it may have expired while the
+      // work ran, and deleting someone else's lock would let two callers
+      // compute the same thing at once.
+      await cacheDeleteIfValue(lockKey, token);
+    }
+  }
+
+  const deadline = Date.now() + SINGLE_FLIGHT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await sleep(SINGLE_FLIGHT_POLL_MS);
+    const hit = await recall(key, options);
+    if (hit) return { value: hit, fromCache: true };
+  }
+
+  log.debug({ key }, "single-flight wait expired; computing the answer directly");
+  return { value: await work(), fromCache: false };
 }

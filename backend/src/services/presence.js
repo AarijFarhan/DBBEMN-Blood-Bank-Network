@@ -19,7 +19,13 @@
  */
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { getPoolForCity } from "../db/registry.js";
-import { candidateCities, addToFilter, rebuildFilter } from "../cache/bloom.js";
+import {
+  candidateCities,
+  addToFilter,
+  rebuildFilter,
+  noteWrite,
+  resolveWrite,
+} from "../cache/bloom.js";
 import { logger } from "../lib/logger.js";
 
 const log = logger.child({ module: "presence" });
@@ -68,14 +74,41 @@ export async function collectAcrossCities(kind, id, cities, lookup) {
 }
 
 /**
+ * Record the *intent* to create a row.
+ *
+ * Must be called **before** the row is committed. The point is to retire the
+ * filter before the row becomes visible: a lookup that runs between the commit
+ * and the filter update would otherwise skip a shard that now holds the row.
+ *
+ * The intent has to be settled exactly once - by `rememberCreated` when the
+ * write lands, or by `cancelCreated` when it is rolled back.
+ */
+export async function noteCreated(kind, cityCode) {
+  await noteWrite(kind, cityCode);
+}
+
+/**
  * Record a newly created row in the presence index.
  *
  * Must be called *after* the row is committed. If it throws, the filter has
  * already marked itself untrusted internally, so the next lookup falls back to a
  * full scan rather than skipping this city.
  */
-export async function rememberCreated(kind, cityCode, id) {
-  await addToFilter(kind, cityCode, id);
+export async function rememberCreated(kind, cityCode, ids) {
+  await addToFilter(kind, cityCode, ids);
+  await resolveWrite(kind, cityCode);
+}
+
+/**
+ * Settle a write intent that never produced a row.
+ *
+ * A rolled-back write needs no bit - the row does not exist - so the intent is
+ * simply resolved. Leaving it unresolved would keep the filter untrusted
+ * forever, which turns one failed transaction into a permanently slower
+ * lookup path.
+ */
+export async function cancelCreated(kind, cityCode) {
+  await resolveWrite(kind, cityCode);
 }
 
 /**
@@ -85,8 +118,11 @@ export async function rememberCreated(kind, cityCode, id) {
  * no-false-negative property hold.
  */
 export async function rebuildPresenceFilter(kind, cityCode, selectIds) {
-  const ids = await selectIds();
-  const outcome = await rebuildFilter(kind, cityCode, ids);
+  // The loader is passed to the rebuild rather than its result, so the table
+  // read happens inside the window where the rebuild compares its mutation
+  // counters. A write that commits during that window is then seen as a write
+  // that overlapped, and the rebuild adds bits instead of replacing the filter.
+  const outcome = await rebuildFilter(kind, cityCode, selectIds);
   log.info(outcome, "presence filter rebuilt");
   return outcome;
 }
