@@ -30,6 +30,15 @@ node_modules
 # local secrets
 .env
 .env.local
+# Backups of the env file are still secrets: they must never be committed.
+.env.backup
+.env.*.backup
+.env.bak
+*.pem
+*.key
+
+# runtime logs (worker stdout/stderr, load-test output)
+*.log
 
 # misc
 /.sass-cache

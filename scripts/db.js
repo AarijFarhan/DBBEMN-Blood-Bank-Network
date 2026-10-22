@@ -83,7 +83,11 @@ export function scriptDatabaseMode() {
   const perCity = CITY_CODES.map((cityCode) => `${cityCode}_DATABASE_URL`).filter(
     (name) => process.env[name],
   );
-  return perCity.length > 0 ? "distributed" : "single";
+  if (perCity.length > 0) return "distributed";
+  if (process.env.CATALOG_DATABASE_URL && CITY_CODES.some((cityCode) => process.env[`${cityCode}_DATABASE_URL`])) {
+    return "distributed";
+  }
+  return process.env.DATABASE_URL ? "single" : "distributed";
 }
 
 let singlePool = null;

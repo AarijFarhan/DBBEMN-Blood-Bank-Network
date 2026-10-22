@@ -1,6 +1,6 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { openSync } from "node:fs";
+import { openSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -16,6 +16,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const workerCount = Number(process.env.WORKER_COUNT ?? 3);
 const basePort = Number(process.env.WORKER_BASE_PORT ?? 4001);
+// Worker logs can get large during load testing, so they are written outside
+// the repository by default. Set LOG_DIR to move them (e.g. to a data volume).
+const logDir = path.resolve(process.env.LOG_DIR ?? root);
 
 if (!Number.isInteger(workerCount) || workerCount < 1) {
   console.error("WORKER_COUNT must be a positive integer.");
@@ -24,6 +27,9 @@ if (!Number.isInteger(workerCount) || workerCount < 1) {
 if (!Number.isInteger(basePort) || basePort < 1 || basePort + workerCount > 65535) {
   console.error("WORKER_BASE_PORT must leave room for WORKER_COUNT ports below 65536.");
   process.exit(1);
+}
+if (!existsSync(logDir)) {
+  mkdirSync(logDir, { recursive: true });
 }
 
 const children = [];
@@ -42,7 +48,7 @@ for (let index = 0; index < workerCount; index += 1) {
   const instanceId = `worker-${index + 1}`;
   // Each worker keeps its own log file, the same way the previous
   // `pnpm start:workers` invocation did.
-  const logStream = openSync(path.join(root, `worker${port}.log`), "a");
+  const logStream = openSync(path.join(logDir, `worker${port}.log`), "a");
 
   const child = spawn(process.execPath, [path.join(root, "backend", "src", "index.js")], {
     cwd: root,
