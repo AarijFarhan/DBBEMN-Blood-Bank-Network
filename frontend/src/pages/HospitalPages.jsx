@@ -254,5 +254,5 @@ export function HospitalReservationsPage() {
 }
 
 function useReservationList(status, hospitalId) {
-  return useRequest(() => api.reservations.list({ hospitalId, status: status || undefined, limit: 100 }), [status, hospitalId]);
+  return useRequest(() => api.reservations.list({ hospitalId, status: status || undefined, limit: 50 }), [status, hospitalId]);
 }

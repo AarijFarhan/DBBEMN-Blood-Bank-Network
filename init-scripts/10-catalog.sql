@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS catalog.users (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username ON catalog.users (lower(username));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email ON catalog.users (lower(email));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_donor_profile
+  ON catalog.users (donor_city_code, donor_id)
+  WHERE role = 'DONOR';
 
 CREATE TABLE IF NOT EXISTS catalog.refresh_tokens (
   token_id UUID PRIMARY KEY,

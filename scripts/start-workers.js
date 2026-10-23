@@ -1,5 +1,6 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createConnection } from "node:net";
 import { openSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +31,37 @@ if (!Number.isInteger(basePort) || basePort < 1 || basePort + workerCount > 6553
 }
 if (!existsSync(logDir)) {
   mkdirSync(logDir, { recursive: true });
+}
+
+async function assertPortAvailable(port) {
+  await new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.setTimeout(1000);
+    socket.once("connect", () => {
+      socket.destroy();
+      reject(new Error(`Port ${port} is already in use. Stop the existing workers before starting a new set.`));
+    });
+    socket.once("error", (error) => {
+      if (error.code === "ECONNREFUSED") {
+        resolve();
+      } else {
+        reject(new Error(`Could not check port ${port}: ${error.message}`));
+      }
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      reject(new Error(`Timed out checking port ${port}.`));
+    });
+  });
+}
+
+try {
+  for (let index = 0; index < workerCount; index += 1) {
+    await assertPortAvailable(basePort + index);
+  }
+} catch (error) {
+  console.error(`[workers] ${error.message}`);
+  process.exit(1);
 }
 
 const children = [];

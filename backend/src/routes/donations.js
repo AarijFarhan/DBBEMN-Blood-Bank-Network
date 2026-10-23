@@ -185,7 +185,7 @@ router.patch(
      const result = await withSerializableRetryFor(getPoolForCity(cityCode))(async (client) => {
        await assertCityWritable(client, cityCode);
        const found = await client.query(
-        `SELECT donation_id, donor_id, blood_bank_id, screening_status, collected_at
+        `SELECT donation_id, donor_id, blood_bank_id, screening_status, collected_at, notes
          FROM ${hist}.donations
          WHERE donation_id = $1
          FOR UPDATE`,
@@ -194,6 +194,9 @@ router.patch(
       const donation = found.rows[0];
       if (!donation) throw new AppError(404, "DONATION_NOT_FOUND", "The donation was not found.");
       requireBankScope(req, donation.blood_bank_id);
+      if (donation.notes?.startsWith("[SAMPLE DATA]")) {
+        throw new AppError(409, "SAMPLE_DONATION_NOT_SCREENABLE", "Sample donations cannot be screened into usable inventory.");
+      }
       if (donation.screening_status !== "PENDING") {
         throw new AppError(409, "DONATION_ALREADY_SCREENED", "This donation has already been screened.");
       }

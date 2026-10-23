@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { useRequest } from "../hooks/useRequest";
 import { BLOOD_GROUPS, COMPONENTS, RH_FACTORS, UNIT_STATUSES } from "../constants";
-import { Button, EmptyState, ErrorState, Field, LoadingState, Modal, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
+import { Button, EmptyState, ErrorState, Field, Icon, LoadingState, Modal, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
 import { errorDetails, formatBloodType, formatComponent, formatDate, formatDateTime, formatNumber, friendlyError, listFrom, normalizeResult } from "../utils";
 import { hasErrors, maxLength, number, oneOf, required, uuid, validate, useFieldErrors } from "../validation";
 
@@ -30,7 +30,7 @@ function UnitTable({ units, onDiscard, emptyTitle = "No units in this view" }) {
     <div className="table-wrap">
       <table className="data-table">
         <thead><tr><th>Unit</th><th>Component</th><th>Group</th><th>Expiry</th><th>Status</th><th /></tr></thead>
-        <tbody>{units.map((unit) => <tr key={unit.unitId || unit.id}><td><strong className="mono-text">{unit.unitId?.slice(0, 12) || "—"}</strong><small>{unit.cityCode || "Local shard"}</small></td><td>{formatComponent(unit.componentType)}<small>{formatNumber(unit.volumeMl)} ml</small></td><td><span className="table-blood-type">{formatBloodType(unit.bloodGroup, unit.rhFactor)}</span></td><td>{formatDate(unit.expiryDate)}</td><td><StatusBadge status={unit.status} /></td><td>{onDiscard && ["AVAILABLE", "QUARANTINE"].includes(unit.status) ? <Button variant="ghost" size="sm" onClick={() => onDiscard(unit)}>Discard</Button> : null}</td></tr>)}</tbody>
+        <tbody>{units.map((unit) => <tr key={unit.unitId || unit.id}><td><strong className="mono-text">{unit.unitId?.slice(0, 12) || "—"}</strong><small>{unit.cityCode || "Local shard"}</small></td><td>{formatComponent(unit.componentType)}<small>{formatNumber(unit.volumeMl)} ml</small></td><td><span className="table-blood-type">{formatBloodType(unit.bloodGroup, unit.rhFactor)}</span></td><td>{formatDate(unit.expiryDate)}</td><td><StatusBadge status={unit.status} />{unit.donationNotes?.startsWith("[SAMPLE DATA]") ? <small><StatusBadge status="SIMULATED" /></small> : null}</td><td>{onDiscard && ["AVAILABLE", "QUARANTINE"].includes(unit.status) ? <Button variant="ghost" size="sm" onClick={() => onDiscard(unit)}>Discard</Button> : null}</td></tr>)}</tbody>
       </table>
     </div>
   );
@@ -44,7 +44,7 @@ export function BankInventoryPage() {
   const [reason, setReason] = useState("");
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const { errors, setErrors, clearError, clearAll } = useFieldErrors();
-  const request = useRequest(() => api.units.list({ bankId: user?.bloodBankId, status: status || undefined, limit: 100 }), [status, user?.bloodBankId]);
+  const request = useRequest(() => api.units.list({ bankId: user?.bloodBankId, status: status || undefined, limit: 50 }), [status, user?.bloodBankId]);
   const units = useMemo(() => listFrom(request.data, ["units", "items"]).map(normalizeResult).filter((unit) => !query || [unit.unitId, unit.bloodGroup, unit.rhFactor, unit.componentType, unit.status].some((value) => String(value || "").toLowerCase().includes(query.toLowerCase()))), [request.data, query]);
   const available = units.filter((unit) => unit.status === "AVAILABLE").length;
   const quarantine = units.filter((unit) => unit.status === "QUARANTINE").length;
@@ -91,10 +91,23 @@ export function BankInventoryPage() {
 export function BankDonationsPage() {
   const { user } = useAuth();
   const [form, setForm] = useState({ donorId: "", volumeMl: 450, componentType: "PRBC" });
+  const [donorSearch, setDonorSearch] = useState("");
+  const [debouncedDonorSearch, setDebouncedDonorSearch] = useState("");
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const { errors, setErrors, clearError } = useFieldErrors();
-  const donations = useRequest(() => api.donations.list({ limit: 100 }), []);
-  const donors = useRequest(() => api.search.donors({ available: "true", limit: 100 }), []);
+  const donations = useRequest(() => api.donations.list({ limit: 50 }), []);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedDonorSearch(donorSearch.trim()), 300);
+    return () => window.clearTimeout(timeout);
+  }, [donorSearch]);
+  const donors = useRequest(
+    () => api.search.donors({
+      available: "true",
+      ...(debouncedDonorSearch ? { search: debouncedDonorSearch } : {}),
+      limit: 100,
+    }),
+    [debouncedDonorSearch],
+  );
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
@@ -125,7 +138,21 @@ export function BankDonationsPage() {
       <div className="workspace-grid workspace-grid-wide">
         <SectionCard title="New collection" description="Eligibility is checked against age, weight, availability, and donation interval.">
           <form className="stack-form" noValidate onSubmit={submit}>
-            <Field label="Donor" error={errors.donorId}><select value={form.donorId} onChange={(event) => update("donorId", event.target.value)}><option value="">Select an available donor</option>{donorRows.map((donor) => <option key={donor.donorId} value={donor.donorId}>{donor.fullName} · {formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</option>)}</select></Field>
+            <Field label="Search available donors">
+              <span className="search-input-wrap">
+                <Icon name="search" size={17} />
+                <input value={donorSearch} onChange={(event) => setDonorSearch(event.target.value)} placeholder="Name, phone, or donor ID" />
+              </span>
+            </Field>
+            <Field label="Donor" error={errors.donorId}>
+              <select value={form.donorId} onChange={(event) => update("donorId", event.target.value)}>
+                <option value="">{donors.loading ? "Searching donors…" : "Select an available donor"}</option>
+                {form.donorId && !donorRows.some((donor) => donor.donorId === form.donorId)
+                  ? <option value={form.donorId}>{form.donorId}</option>
+                  : null}
+                {donorRows.map((donor) => <option key={donor.donorId} value={donor.donorId}>{donor.fullName} · {formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</option>)}
+              </select>
+            </Field>
             {donors.error ? <span className="field-hint">Donor search unavailable. Paste a donor UUID below.</span> : null}
             <Field label="Donor ID" hint="Required UUID from the donor directory." error={errors.donorId}><input value={form.donorId} onChange={(event) => update("donorId", event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /></Field>
             <div className="form-grid form-grid-two"><Field label="Collected volume (ml)" error={errors.volumeMl}><input type="number" min="350" max="500" step="1" value={form.volumeMl} onChange={(event) => update("volumeMl", event.target.value)} /></Field><Field label="Component" error={errors.componentType}><select value={form.componentType} onChange={(event) => update("componentType", event.target.value)}>{COMPONENTS.map((component) => <option key={component.value} value={component.value}>{component.label}</option>)}</select></Field></div>
@@ -137,7 +164,7 @@ export function BankDonationsPage() {
         </SectionCard>
       </div>
       <SectionCard title="Recent donations" description="The latest collection records for your bank.">
-        {donations.loading ? <LoadingState label="Loading donation history" /> : null}{donations.error ? <ErrorState error={donations.error} onRetry={donations.reload} /> : null}{!donations.loading && !donations.error ? rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Collected</th><th>Donor</th><th>Volume</th><th>Screening</th><th>Bank</th></tr></thead><tbody>{rows.map((donation) => <tr key={donation.donationId}><td>{formatDateTime(donation.collectedAt)}</td><td className="mono-text">{donation.donorId?.slice(0, 12)}</td><td>{formatNumber(donation.volumeMl)} ml</td><td><StatusBadge status={donation.screeningStatus} /></td><td className="mono-text">{donation.bloodBankId?.slice(0, 12)}</td></tr>)}</tbody></table></div> : <EmptyState title="No donations recorded">New collections will appear here after they are saved.</EmptyState> : null}
+        {donations.loading ? <LoadingState label="Loading donation history" /> : null}{donations.error ? <ErrorState error={donations.error} onRetry={donations.reload} /> : null}{!donations.loading && !donations.error ? rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Collected</th><th>Donor</th><th>Volume</th><th>Screening</th><th>Bank</th></tr></thead><tbody>{rows.map((donation) => <tr key={donation.donationId}><td>{formatDateTime(donation.collectedAt)}</td><td className="mono-text">{donation.donorId?.slice(0, 12)}{donation.notes?.startsWith("[SAMPLE DATA]") ? <small><StatusBadge status="SIMULATED" /></small> : null}</td><td>{formatNumber(donation.volumeMl)} ml</td><td><StatusBadge status={donation.screeningStatus} /></td><td className="mono-text">{donation.bloodBankId?.slice(0, 12)}</td></tr>)}</tbody></table></div> : <EmptyState title="No donations recorded">New collections will appear here after they are saved.</EmptyState> : null}
       </SectionCard>
     </div>
   );
@@ -145,7 +172,7 @@ export function BankDonationsPage() {
 
 export function BankScreeningPage() {
   const [action, setAction] = useState({ id: null, error: null, success: null });
-  const request = useRequest(() => api.donations.list({ limit: 100 }), []);
+  const request = useRequest(() => api.donations.list({ limit: 50 }), []);
   const donations = listFrom(request.data, ["donations"]).filter((item) => item.screeningStatus === "PENDING");
 
   async function screen(donation, status) {
@@ -165,7 +192,7 @@ export function BankScreeningPage() {
       {action.success ? <Notice tone="success" title="Screening saved">{action.success}</Notice> : null}
       {action.error ? <Notice tone="error" title="Screening failed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
       <SectionCard title="Pending screening" description="Only PENDING donations can transition from quarantine.">
-        {request.loading ? <LoadingState label="Loading screening queue" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? donations.length ? <div className="screening-list">{donations.map((donation) => <div className="screening-row" key={donation.donationId}><div><strong>Donation {donation.donationId?.slice(0, 12)}</strong><span>{formatDateTime(donation.collectedAt)} · {formatNumber(donation.volumeMl)} ml</span></div><div className="card-actions"><Button variant="secondary" size="sm" onClick={() => screen(donation, "FAILED")} disabled={Boolean(action.id)}>Mark failed</Button><Button size="sm" onClick={() => screen(donation, "PASSED")} disabled={Boolean(action.id)}>{action.id === donation.donationId ? "Saving…" : "Mark passed"}</Button></div></div>)}</div> : <EmptyState title="Screening queue is clear">New quarantined donations will appear here.</EmptyState> : null}
+        {request.loading ? <LoadingState label="Loading screening queue" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? donations.length ? <div className="screening-list">{donations.map((donation) => { const sample = donation.notes?.startsWith("[SAMPLE DATA]"); return <div className="screening-row" key={donation.donationId}><div><strong>Donation {donation.donationId?.slice(0, 12)} {sample ? <StatusBadge status="SIMULATED" /> : null}</strong><span>{formatDateTime(donation.collectedAt)} · {formatNumber(donation.volumeMl)} ml</span>{sample ? <small>Sample record only; screening actions are disabled.</small> : null}</div><div className="card-actions"><Button variant="secondary" size="sm" onClick={() => screen(donation, "FAILED")} disabled={Boolean(action.id) || sample}>Mark failed</Button><Button size="sm" onClick={() => screen(donation, "PASSED")} disabled={Boolean(action.id) || sample}>{action.id === donation.donationId ? "Saving…" : "Mark passed"}</Button></div></div>; })}</div> : <EmptyState title="Screening queue is clear">New quarantined donations will appear here.</EmptyState> : null}
       </SectionCard>
     </div>
   );
@@ -173,7 +200,7 @@ export function BankScreeningPage() {
 
 export function BankDispatchPage() {
   const [action, setAction] = useState({ id: null, error: null, success: null });
-  const request = useRequest(() => api.reservations.list({ status: "ACTIVE", limit: 100 }), []);
+  const request = useRequest(() => api.reservations.list({ status: "ACTIVE", limit: 50 }), []);
   const reservations = listFrom(request.data, ["reservations"]);
 
   async function dispatch(reservation) {
@@ -203,7 +230,7 @@ export function BankDiscardPage() {
   const [selected, setSelected] = useState(null);
   const [reason, setReason] = useState("");
   const { errors, setErrors, clearError, clearAll } = useFieldErrors();
-  const request = useRequest(() => api.units.list({ status: "QUARANTINE", limit: 100 }), []);
+  const request = useRequest(() => api.units.list({ status: "QUARANTINE", limit: 50 }), []);
   const units = listFrom(request.data, ["units", "items"]).map(normalizeResult);
 
   function openDiscard(unit) {

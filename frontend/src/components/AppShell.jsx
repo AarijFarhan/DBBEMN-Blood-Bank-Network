@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ROLE_LABELS, ROLE_SHORT_LABELS } from "../constants";
 import { useAuth } from "../auth";
-import { displayUserName } from "../utils";
+import { useRequest } from "../hooks/useRequest";
+import { api } from "../api";
+import { displayUserName, listFrom } from "../utils";
 import { Button, Icon, RoleBadge, UserAvatar } from "./UI";
 
 const navigation = {
@@ -34,7 +36,7 @@ const navigation = {
     { to: "/app/system/cluster", label: "Cluster status", detail: "Shard telemetry", icon: "server" },
     { to: "/app/system/donors", label: "Donor directory", detail: "Availability by city", icon: "users" },
     { to: "/app/system/hospitals", label: "Hospitals & banks", detail: "Register facilities", icon: "hospital" },
-    { to: "/app/system/users", label: "Users", detail: "Accounts and access", icon: "shield" },
+    { to: "/app/system/users", label: "Registered Users", detail: "Accounts and access", icon: "shield" },
   ],
 };
 
@@ -45,6 +47,28 @@ export default function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const items = navigation[user?.role] || [];
   const current = items.find((item) => location.pathname.startsWith(item.to));
+  const donorRequests = useRequest(
+    () => user?.role === "DONOR" ? api.donorRequests.list({ limit: 50 }) : Promise.resolve({ requests: [] }),
+    [user?.role],
+  );
+  const pendingDonorRequests = user?.role === "DONOR"
+    ? listFrom(donorRequests.data, ["requests"]).filter((request) => request.status === "PENDING").length
+    : 0;
+
+  useEffect(() => {
+    if (user?.role === "DONOR") donorRequests.reload();
+  }, [location.pathname, user?.role]);
+
+  useEffect(() => {
+    if (user?.role !== "DONOR") return undefined;
+    const refreshRequests = () => donorRequests.reload();
+    const intervalId = window.setInterval(refreshRequests, 30_000);
+    window.addEventListener("donor-requests-updated", refreshRequests);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("donor-requests-updated", refreshRequests);
+    };
+  }, [user?.role]);
 
   async function handleLogout() {
     await logout();
@@ -75,10 +99,19 @@ export default function AppShell() {
               onClick={() => setMenuOpen(false)}
             >
               <span className="nav-item-mark" aria-hidden="true"><Icon name={item.icon} size={17} /></span>
-              <span>
+              <span className="nav-item-copy">
                 <strong>{item.label}</strong>
                 <small>{item.detail}</small>
               </span>
+              {item.to === "/app/donor/requests" && pendingDonorRequests > 0 ? (
+                <span
+                  className="nav-notification"
+                  aria-label={`${pendingDonorRequests} pending blood ${pendingDonorRequests === 1 ? "request" : "requests"}`}
+                  title={`${pendingDonorRequests} pending blood ${pendingDonorRequests === 1 ? "request" : "requests"}`}
+                >
+                  {pendingDonorRequests > 99 ? "99+" : pendingDonorRequests}
+                </span>
+              ) : null}
             </NavLink>
           ))}
         </nav>

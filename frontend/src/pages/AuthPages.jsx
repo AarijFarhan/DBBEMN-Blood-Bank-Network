@@ -166,12 +166,15 @@ export function RegisterPage() {
       <form className="stack-form" noValidate onSubmit={submit}>
         <div className="form-grid form-grid-two">
           <Field label="Full name" error={errors.fullName}><input value={form.fullName} onChange={(event) => update("fullName", event.target.value)} placeholder="Your legal name" /></Field>
-          <Field label="Username" error={errors.username}><input value={form.username} onChange={(event) => update("username", event.target.value)} placeholder="Choose a username" /></Field>
-        </div>
-        <div className="form-grid form-grid-two">
-          <Field label="Email" error={errors.email}><input type="email" value={form.email} onChange={(event) => update("email", event.target.value)} placeholder="you@example.com" /></Field>
           <Field label="Phone" error={errors.phone}><input value={form.phone} onChange={(event) => update("phone", event.target.value)} placeholder="+92 300 0000000" /></Field>
         </div>
+        <div className="auth-role-note"><span className="info-mark"><Icon name="shield" size={13} /></span><span>Portal login details</span></div>
+        <div className="form-grid form-grid-two">
+          <Field label="Username" error={errors.username}><input autoComplete="username" value={form.username} onChange={(event) => update("username", event.target.value)} placeholder="Choose a username" /></Field>
+          <Field label="Email" error={errors.email}><input type="email" autoComplete="email" value={form.email} onChange={(event) => update("email", event.target.value)} placeholder="you@example.com" /></Field>
+        </div>
+        <Field label="Password" hint="At least 8 characters. Never share credentials." error={errors.password}><input type="password" autoComplete="new-password" value={form.password} onChange={(event) => update("password", event.target.value)} placeholder="Create a strong password" /></Field>
+        <div className="auth-role-note"><span className="info-mark"><Icon name="info" size={13} /></span><span>Donor profile details</span></div>
         <div className="form-grid form-grid-three">
           <Field label="Date of birth" error={errors.dateOfBirth}><input type="date" value={form.dateOfBirth} onChange={(event) => update("dateOfBirth", event.target.value)} /></Field>
           <Field label="Sex" error={errors.sex}><select value={form.sex} onChange={(event) => update("sex", event.target.value)}><option value="M">Male</option><option value="F">Female</option></select></Field>
@@ -182,7 +185,6 @@ export function RegisterPage() {
           <Field label="Rh factor" error={errors.rhFactor}><select value={form.rhFactor} onChange={(event) => update("rhFactor", event.target.value)}><option value="POS">Positive</option><option value="NEG">Negative</option></select></Field>
           <Field label="City" error={errors.cityCode}><select value={form.cityCode} onChange={(event) => update("cityCode", event.target.value)}>{cities.map((city) => <option key={city.cityCode || city.code} value={city.cityCode || city.code}>{city.name || city.cityCode || city.code}</option>)}</select></Field>
         </div>
-        <Field label="Password" hint="At least 8 characters. Never share credentials." error={errors.password}><input type="password" autoComplete="new-password" value={form.password} onChange={(event) => update("password", event.target.value)} placeholder="Create a strong password" /></Field>
         <Button type="submit" size="lg" disabled={submitting}>{submitting ? "Creating profile…" : "Create donor profile"}</Button>
       </form>
       <div className="auth-switch">Already registered? <Link to="/login">Sign in instead</Link></div>

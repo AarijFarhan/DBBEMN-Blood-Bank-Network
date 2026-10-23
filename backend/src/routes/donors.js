@@ -18,6 +18,7 @@ const donorQuerySchema = z.object({
   bloodGroup: bloodGroupSchema.optional(),
   rh: z.enum(["POS", "NEG"]).optional(),
   available: z.enum(["true", "false"]).optional(),
+  search: z.string().trim().max(100).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 const availabilitySchema = z.object({ isAvailable: z.boolean() });
@@ -83,6 +84,14 @@ router.patch(
     const { hist } = schemasFor(req.user.donor_city_code);
     const result = await withSerializableRetryFor(getPoolForCity(req.user.donor_city_code))(async (client) => {
       await assertCityWritable(client, req.user.donor_city_code);
+      const profile = await client.query(
+        `SELECT full_name FROM ${hist}.donors WHERE donor_id = $1 FOR UPDATE`,
+        [id.data],
+      );
+      if (profile.rowCount === 0) return null;
+      if (profile.rows[0].full_name.startsWith("[SAMPLE]")) {
+        throw new AppError(409, "SAMPLE_DONOR_NOT_UPDATABLE", "Sample donor profiles cannot be made available for real donation requests.");
+      }
       return client.query(
         `UPDATE ${hist}.donors
          SET is_available = $1
@@ -91,7 +100,7 @@ router.patch(
         [body.data.isAvailable, id.data],
       );
     });
-    if (result.rowCount === 0) throw new AppError(404, "DONOR_NOT_FOUND", "The donor was not found.");
+    if (!result || result.rowCount === 0) throw new AppError(404, "DONOR_NOT_FOUND", "The donor was not found.");
     res.json({ donor: result.rows[0] });
   }),
 );
@@ -101,74 +110,77 @@ router.get(
   authenticate,
   requireRole("HOSPITAL_ADMIN", "BLOODBANK_ADMIN", "SYSTEM_ADMIN"),
   asyncRoute(async (req, res) => {
-    try {
-      const query = parseQuery(donorQuerySchema, req.query);
-      let cities = query.city ? [query.city] : CITY_CODES;
-      if (req.user.role === "BLOODBANK_ADMIN") {
-        const bank = await getActiveBank(req.user.blood_bank_id);
-        const bankCity = bank.city_code.trim();
-        if (query.city && query.city !== bankCity) {
-          throw new AppError(403, "TENANT_SCOPE_VIOLATION", "A blood bank can only search donors in its city.");
-        }
-        cities = [bankCity];
+    const query = parseQuery(donorQuerySchema, req.query);
+    let cities = query.city ? [query.city] : CITY_CODES;
+    if (req.user.role === "BLOODBANK_ADMIN") {
+      const bank = await getActiveBank(req.user.blood_bank_id);
+      const bankCity = bank.city_code.trim();
+      if (query.city && query.city !== bankCity) {
+        throw new AppError(403, "TENANT_SCOPE_VIOLATION", "A blood bank can only search donors in its city.");
       }
-      if (req.user.role === "HOSPITAL_ADMIN") {
-        if (!query.city) {
-          const hospital = await getActiveHospital(req.user.hospital_id);
-          const local = hospital.city_code.trim();
-          cities = [local, ...CITY_CODES.filter((code) => code !== local)];
-        }
-      }
-
-      const limitedCities = cities.slice(0, 3);
-      const results = await Promise.all(
-        limitedCities.map(async (cityCode) => {
-          const { hist } = schemasFor(cityCode);
-          const values = [
-            query.bloodGroup ?? null,
-            query.rh ?? null,
-            query.available === undefined ? null : query.available === "true",
-          ];
-          const where = `WHERE ($1::common.blood_group_t IS NULL OR blood_group = $1)
-                AND ($2::common.rh_t IS NULL OR rh_factor = $2)
-                AND ($3::boolean IS NULL OR is_available = $3)`;
-          const cityPool = getPoolForCity(cityCode);
-          try {
-            const [rows, counted] = await Promise.all([
-              cityPool.query(
-                `SELECT donor_id AS "donorId", full_name AS "fullName", phone,
-                        date_of_birth AS "dateOfBirth", weight_kg AS "weightKg",
-                        blood_group AS "bloodGroup", rh_factor AS "rhFactor",
-                        city_code AS "cityCode", last_donation_date AS "lastDonationDate",
-                        is_available AS "isAvailable"
-                 FROM ${hist}.donors
-                 ${where}
-                 ORDER BY created_at DESC
-                 LIMIT $4`,
-                [...values, query.limit],
-              ),
-              cityPool.query(
-                `SELECT count(*)::int AS total FROM ${hist}.donors ${where}`,
-                values,
-              ),
-            ]);
-            return { cityCode, rows: rows.rows, total: counted.rows[0].total };
-          } catch {
-            return { cityCode, rows: [], total: 0 };
-          }
-        }),
-      );
-      const byCity = Object.fromEntries(results.map((item) => [item.cityCode, item.total]));
-      const total = results.reduce((sum, item) => sum + item.total, 0);
-      res.json({
-        donors: results.flatMap((item) => item.rows),
-        total,
-        byCity,
-        truncated: results.some((item) => item.total > item.rows.length),
-      });
-    } catch (error) {
-      res.json({ donors: [], total: 0, byCity: {}, truncated: false, degraded: true });
+      cities = [bankCity];
     }
+    if (req.user.role === "HOSPITAL_ADMIN" && !query.city) {
+      const hospital = await getActiveHospital(req.user.hospital_id);
+      const local = hospital.city_code.trim();
+      cities = [local, ...CITY_CODES.filter((code) => code !== local)];
+    }
+
+    const selectedCities = req.user.role === "SYSTEM_ADMIN" ? cities : cities.slice(0, 3);
+    const results = await Promise.all(
+      selectedCities.map(async (cityCode) => {
+        const { hist } = schemasFor(cityCode);
+        const values = [
+          query.bloodGroup ?? null,
+          query.rh ?? null,
+          query.available === undefined ? null : query.available === "true",
+          query.search || null,
+        ];
+        const where = `WHERE ($1::common.blood_group_t IS NULL OR blood_group = $1)
+              AND ($2::common.rh_t IS NULL OR rh_factor = $2)
+              AND ($3::boolean IS NULL OR is_available = $3)
+              AND ($4::text IS NULL OR full_name ILIKE '%' || $4 || '%'
+                   OR phone ILIKE '%' || $4 || '%'
+                   OR donor_id::text ILIKE '%' || $4 || '%')`;
+        const cityPool = getPoolForCity(cityCode);
+        try {
+          const [rows, counted] = await Promise.all([
+            cityPool.query(
+              `SELECT donor_id AS "donorId", full_name AS "fullName", phone,
+                      date_of_birth AS "dateOfBirth", weight_kg AS "weightKg",
+                      blood_group AS "bloodGroup", rh_factor AS "rhFactor",
+                      city_code AS "cityCode", last_donation_date AS "lastDonationDate",
+                      is_available AS "isAvailable"
+               FROM ${hist}.donors
+               ${where}
+               ORDER BY created_at DESC
+               LIMIT $5`,
+              [...values, query.limit],
+            ),
+            cityPool.query(
+              `SELECT count(*)::int AS total FROM ${hist}.donors ${where}`,
+              values,
+            ),
+          ]);
+          return { cityCode, rows: rows.rows, total: counted.rows[0].total };
+        } catch (error) {
+          req.log?.warn({ err: error, cityCode }, "donor search shard unavailable");
+          return { cityCode, rows: [], total: 0, unavailable: true };
+        }
+      }),
+    );
+    const byCity = Object.fromEntries(results.map((item) => [item.cityCode, item.total]));
+    const total = results.reduce((sum, item) => sum + item.total, 0);
+    const unavailableCities = results.filter((item) => item.unavailable).map((item) => item.cityCode);
+    res.json({
+      donors: results.flatMap((item) => item.rows),
+      total,
+      byCity,
+      truncated: results.some((item) => item.total > item.rows.length),
+      meta: unavailableCities.length
+        ? { partial: true, unavailableCities }
+        : { partial: false, unavailableCities: [] },
+    });
   }),
 );
 

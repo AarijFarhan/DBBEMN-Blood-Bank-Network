@@ -163,7 +163,7 @@ An emergency caller gets a partial answer instantly instead of no answer.
 | Component | Choice | Notes |
 |---|---|---|
 | Framework | React 19.1.0 | Plain JavaScript + JSX. No TypeScript. |
-| Build tool | Vite 7.3.2 | Dev proxy for `/api/v1` → `localhost:8080` |
+| Build tool | Vite 7.3.2 | Dev proxy for `/api/v1` → local gateway on `localhost:80` |
 | Routing | react-router-dom 6.x | Basename from `import.meta.env.BASE_URL` |
 | HTTP client | **Hand-rolled `fetch` wrapper** | `frontend/src/api.js` — see below |
 | Styling | Hand-written CSS | `frontend/src/styles.css` (~36 KB). **No Tailwind.** |
@@ -193,7 +193,8 @@ const API_ROOT = configuredApiUrl.endsWith(API_PREFIX)
 `VITE_API_URL` accepts either a bare origin or a full path ending in `/api/v1`; trailing
 slashes are normalised so the path can never be built as `//api/v1`. When unset, the
 Render backend is used, so a Vercel build needs no configuration. Set it to
-`http://localhost:8080` to develop against a local backend.
+`http://localhost` to develop against the local gateway. If running only the
+standalone backend instead, set `VITE_API_PROXY_TARGET=http://localhost:8080`.
 
 ### 3.2 Backend
 
@@ -832,7 +833,7 @@ pnpm bootstrap:admin
 
 # 6. run
 pnpm dev            # API with --watch on :8080
-cd frontend && pnpm dev   # Vite on :5173, proxying /api/v1 → :8080
+cd frontend && pnpm dev   # Vite on :5173, proxying /api/v1 → local gateway :80
 ```
 
 `pnpm seed` and `pnpm seed:small` are **demo data only** and are not required to run

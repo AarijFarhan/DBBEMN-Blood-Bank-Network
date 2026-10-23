@@ -114,21 +114,28 @@ router.get(
     const cities = query.city ? [query.city] : scope.cities;
 
     const offset = (query.page - 1) * query.limit;
-    const fetchLimit = query.limit + 1;
+    const fetchLimit = query.donorIds ? query.donorIds.length + 1 : query.limit + 1;
     const results = await Promise.all(
       cities.map(async (cityCode) => {
         const { hot, hist } = schemasFor(cityCode);
-        const values = [scope.value, query.status ?? null, fetchLimit, offset];
+        const values = [scope.value, query.status ?? null, fetchLimit, offset, query.donorIds ?? null];
         const issuerFilter = scope.column
           ? `r.${scope.column} = $1`
           : `($1::uuid IS NULL OR r.requested_by_hospital_id = $1 OR r.requested_by_blood_bank_id = $1)`;
+        const requestSelection = query.donorIds
+          ? `SELECT DISTINCT ON (r.donor_id) ${REQUEST_COLUMNS}`
+          : `SELECT ${REQUEST_COLUMNS}`;
+        const requestOrdering = query.donorIds
+          ? "ORDER BY r.donor_id, r.requested_at DESC"
+          : "ORDER BY r.requested_at DESC";
         const rows = await getPoolForCity(cityCode).query(
-          `SELECT ${REQUEST_COLUMNS}
+          `${requestSelection}
            FROM ${hot}.donor_requests r
            JOIN ${hist}.donors d ON d.donor_id = r.donor_id
            WHERE ${issuerFilter}
              AND ($2::common.donor_request_status_t IS NULL OR r.status = $2)
-           ORDER BY r.requested_at DESC
+             AND ($5::uuid[] IS NULL OR r.donor_id = ANY($5))
+           ${requestOrdering}
            LIMIT $3 OFFSET $4`,
           values,
         );
@@ -140,13 +147,13 @@ router.get(
       .flat()
       .sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt));
     const hasMore = allMerged.length > query.limit;
-    const sliced = allMerged.slice(0, query.limit);
+    const sliced = query.donorIds ? allMerged : allMerged.slice(0, query.limit);
     const requests = await attachIssuerNames(sliced);
     res.json({
       requests,
       page: query.page,
       limit: query.limit,
-      hasMore,
+      hasMore: query.donorIds ? false : hasMore,
       total: requests.length,
       byStatus: requests.reduce((acc, item) => ({ ...acc, [item.status]: (acc[item.status] ?? 0) + 1 }), {}),
     });

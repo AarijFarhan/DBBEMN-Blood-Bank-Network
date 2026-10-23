@@ -6,7 +6,7 @@ const API_PREFIX = "/api/v1";
 const configuredApiUrl = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
 // Resolution order:
 //   1. VITE_API_URL when set (explicit override, e.g. staging).
-//   2. In dev, a relative "/api/v1" so the Vite proxy forwards to localhost:8080
+//   2. In dev, a relative "/api/v1" so the Vite proxy forwards to the local API gateway
 //      and the browser never sees a cross-origin request.
 //   3. Production build with no config keeps the Render fallback.
 const API_ROOT = configuredApiUrl
@@ -222,7 +222,7 @@ export const api = {
   system: {
     cluster: () => request("/admin/cluster-status"),
     chaos: (city, action, body) => request(`/admin/chaos/${city}/${action}`, { method: "POST", body }),
-    listUsers: () => request("/admin/users"),
+    listUsers: (params) => request(queryPath("/admin/users", params)),
     createUser: (body) => request("/admin/users", { method: "POST", body }),
     createHospital: (body) => request("/admin/hospitals", { method: "POST", body }),
     createBloodBank: (body) => request("/admin/blood-banks", { method: "POST", body }),

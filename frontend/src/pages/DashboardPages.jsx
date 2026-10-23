@@ -34,8 +34,26 @@ const STATUS_COLORS = {
 };
 const URGENCY_COLORS = { CRITICAL: "#dc2626", URGENT: "#d97706", ROUTINE: "#64748b" };
 
+function formatCompactNumber(value) {
+  return new Intl.NumberFormat("en", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(Number(value));
+}
+
+function formatTrendDate(value) {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: "UTC" }).format(date);
+}
+
 function groupRows(matrix) {
-  return GROUP_ORDER.map((group) => ({ group, ...(matrix?.[group] ?? { count: 0 }) }));
+  return GROUP_ORDER.map((group) => {
+    const suffix = group.endsWith("+") ? "POS" : "NEG";
+    const bloodGroup = group.slice(0, -1);
+    return { group, count: matrix?.[`${bloodGroup}${suffix}`]?.count ?? matrix?.[`${bloodGroup}${suffix}`] ?? 0 };
+  });
 }
 
 function statusRows(byStatus) {
@@ -50,13 +68,23 @@ function MatrixChart({ matrix, seriesKey = "count", stacked = true }) {
   const rows = useMemo(() => groupRows(matrix), [matrix]);
   return (
     <ResponsiveContainer width="100%" height={260}>
-      <BarChart data={rows} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+      <BarChart data={rows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,.25)" vertical={false} />
         <XAxis dataKey="group" tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 12 }} axisLine={false} tickLine={false} allowDecimals={false} />
-        <Tooltip cursor={{ fill: "rgba(37,99,235,.06)" }} />
-        <Legend wrapperStyle={{ fontSize: 12 }} />
-        <Bar dataKey={seriesKey} stackId={stacked ? "a" : undefined} fill="#2563eb" radius={stacked ? [4, 4, 0, 0] : 4} />
+        <YAxis
+          width={54}
+          tick={{ fontSize: 11 }}
+          tickFormatter={formatCompactNumber}
+          axisLine={false}
+          tickLine={false}
+          allowDecimals={false}
+          tickCount={5}
+        />
+        <Tooltip
+          cursor={{ fill: "rgba(37,99,235,.06)" }}
+          formatter={(value) => [formatNumber(value), "Units"]}
+        />
+        <Bar dataKey={seriesKey} stackId={stacked ? "a" : undefined} fill="#2563eb" radius={stacked ? [4, 4, 0, 0] : 4} maxBarSize={32} />
       </BarChart>
     </ResponsiveContainer>
   );
@@ -83,11 +111,22 @@ function TrendChart({ points }) {
   if (!points?.length) return <p className="chart-empty">No donation history in this window.</p>;
   return (
     <ResponsiveContainer width="100%" height={240}>
-      <LineChart data={points} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
+      <LineChart data={points} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,.25)" vertical={false} />
-        <XAxis dataKey="day" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={28} />
-        <YAxis tick={{ fontSize: 12 }} axisLine={false} tickLine={false} allowDecimals={false} />
-        <Tooltip />
+        <XAxis dataKey="day" tick={{ fontSize: 11 }} tickFormatter={formatTrendDate} axisLine={false} tickLine={false} minTickGap={28} />
+        <YAxis
+          width={54}
+          tick={{ fontSize: 11 }}
+          tickFormatter={formatCompactNumber}
+          axisLine={false}
+          tickLine={false}
+          allowDecimals={false}
+          tickCount={5}
+        />
+        <Tooltip
+          labelFormatter={(label) => formatTrendDate(label)}
+          formatter={(value) => [formatNumber(value), "Collections"]}
+        />
         <Line type="monotone" dataKey="donations" stroke="#2563eb" strokeWidth={2.5} dot={false} />
       </LineChart>
     </ResponsiveContainer>
@@ -102,13 +141,12 @@ function TrendChart({ points }) {
  * makes the page live: every reservation, screening, sweep, or chaos flip
  * pushes a row into the activity panel without a manual refresh.
  */
-function DashboardBody({ overview, timeseries, feed }) {
+function DashboardBody({ overview, timeseries, feed, showUserCount = false }) {
   const cities = overview?.cities ? Object.entries(overview.cities) : [];
   const totals = overview?.totals || {};
   const available = totals.unitsByStatus?.AVAILABLE ?? 0;
   const reserved = totals.unitsByStatus?.RESERVED ?? 0;
   const quarantine = totals.unitsByStatus?.QUARANTINE ?? 0;
-
   const groupSeries = useMemo(() => {
     if (!overview?.cities) return [];
     const combined = {};
@@ -135,12 +173,14 @@ function DashboardBody({ overview, timeseries, feed }) {
         <StatCard label="Expiring in 7 days" value={formatNumber(totals.expiring7d ?? 0)} detail="Needs attention" tone="red" icon="alert" />
         <StatCard label="Donations (30d)" value={formatNumber(totals.donationsLast30Days ?? 0)} detail="Collected network-wide" tone="purple" icon="heart" />
         <StatCard label="Transfusions (30d)" value={formatNumber(totals.transfusionsLast30Days ?? 0)} detail="Completed requests" tone="slate" icon="truck" />
+        {showUserCount ? <StatCard label="Users" value={formatNumber(totals.userCount)} detail="Registered accounts" tone="blue" icon="users" /> : null}
+        {showUserCount ? <StatCard label="Hospitals" value={formatNumber(totals.hospitalCount)} detail="Active hospital records" tone="purple" icon="hospital" /> : null}
+        {showUserCount ? <StatCard label="Blood banks" value={formatNumber(totals.bloodBankCount)} detail="Active blood-bank records" tone="red" icon="server" /> : null}
       </div>
 
       {overview?.partial ? (
         <PartialResults meta={{ partial: true, unavailableCities: overview.unavailableCities }} />
       ) : null}
-
       <div className="dashboard-grid">
         <SectionCard title="Inventory by blood group" description="Available units per group across the shards in scope." icon="droplet">
           <MatrixChart matrix={totals.unitsByGroup} />
@@ -218,6 +258,7 @@ export function SystemDashboardPage() {
           overview={overview.data}
           timeseries={timeseries.data}
           feed={feed}
+          showUserCount
         />
       ) : null}
     </div>

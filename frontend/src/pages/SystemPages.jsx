@@ -1,11 +1,22 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRequest } from "../hooks/useRequest";
 import { usePagination } from "../hooks/usePagination";
 import { api } from "../api";
 import { BLOOD_GROUPS, CITIES, RH_FACTORS } from "../constants";
-import { AvailabilityBadge, Button, Checkbox, ConfirmDeleteModal, EmptyState, ErrorState, Field, LoadingState, Modal, Notice, PageHeader, PaginationControls, PartialResults, RoleBadge, SectionCard, SimulatedBadge, StatusBadge } from "../components/UI";
+import { AvailabilityBadge, Button, Checkbox, ConfirmDeleteModal, EmptyState, ErrorState, Field, Icon, LoadingState, Modal, Notice, PageHeader, PaginationControls, PartialResults, RoleBadge, SectionCard, SimulatedBadge, StatusBadge } from "../components/UI";
 import { ageFromDate, errorDetails, formatBloodType, formatDate, formatDateTime, formatNumber, friendlyError, listFrom } from "../utils";
 import { email as emailRule, hasErrors, maxLength, minLength, number, oneOf, password as passwordRule, phone as phoneRule, required, username as usernameRule, validate, useFieldErrors } from "../validation";
+
+function useDebouncedValue(value, delay = 300) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedValue(value), delay);
+    return () => window.clearTimeout(timeout);
+  }, [value, delay]);
+
+  return debouncedValue;
+}
 
 const FACILITY_RULES = {
   cityCode: [required("City shard"), oneOf(CITIES.map((city) => city.cityCode), "City shard")],
@@ -21,6 +32,8 @@ const USER_RULES = {
   email: [required("Email"), emailRule],
   password: [required("Password"), passwordRule("Password")],
 };
+const HOSPITAL_RULES = { ...FACILITY_RULES, ...USER_RULES };
+const BLOOD_BANK_RULES = HOSPITAL_RULES;
 
 const LAG_RULES = { lag: [required("Replica lag"), number({ min: 0, max: 60000, integer: true, label: "Replica lag" })] };
 
@@ -96,11 +109,13 @@ export function ChaosPage() {
 }
 
 export function DonorDirectoryPage() {
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
   const [city, setCity] = useState("");
   const [bloodGroup, setBloodGroup] = useState("");
   const [rh, setRh] = useState("");
   const [availableOnly, setAvailableOnly] = useState(false);
-  const { page, limit: pageSize, setPage, resetPage } = usePagination({ defaultLimit: 50 });
+  const { page, limit: pageSize, setPage, resetPage } = usePagination({ defaultLimit: 20 });
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -108,21 +123,22 @@ export function DonorDirectoryPage() {
   const request = useRequest(
     () =>
       api.search.donors({
+        ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
         ...(city ? { city } : {}),
         ...(bloodGroup ? { bloodGroup } : {}),
         ...(rh ? { rh } : {}),
         ...(availableOnly ? { available: "true" } : {}),
         limit: 100,
       }),
-    [city, bloodGroup, rh, availableOnly],
+    [debouncedSearch, city, bloodGroup, rh, availableOnly],
   );
 
   const donors = listFrom(request.data, ["donors"]);
   const pageDonors = donors.slice((page - 1) * pageSize, page * pageSize);
   const totalMatched = request.data?.total ?? donors.length;
   const availableCount = donors.filter((donor) => donor.isAvailable).length;
-  const cityCount = new Set(donors.map((donor) => donor.cityCode)).size;
   const byCity = request.data?.byCity || {};
+  const cityCount = Object.keys(byCity).length;
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -148,8 +164,14 @@ export function DonorDirectoryPage() {
         description="Every donor profile held in the city history shards, with the availability signal blood banks read when scheduling a collection."
         actions={<Button variant="secondary" onClick={request.reload} disabled={request.loading}>Refresh directory</Button>}
       />
-      <SectionCard title="Filters" description="Leave a field empty to search every city shard. Results are capped at 100 donors per city.">
+      <SectionCard title="Search & filters" description="Search donor name, phone, or ID across all 10 city shards. Up to 100 matching donors per shard are listed, with 20 donors per page.">
         <div className="form-grid form-grid-four">
+          <Field label="Search donors">
+            <span className="search-input-wrap">
+              <Icon name="search" size={17} />
+              <input value={search} onChange={(event) => { setSearch(event.target.value); resetPage(); }} placeholder="Name, phone, or donor ID" />
+            </span>
+          </Field>
           <Field label="City shard">
             <select value={city} onChange={(event) => { setCity(event.target.value); resetPage(); }}>
               <option value="">All cities</option>
@@ -177,16 +199,17 @@ export function DonorDirectoryPage() {
       {request.loading ? <SectionCard><LoadingState label="Loading donor directory" /></SectionCard> : null}
       {request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}
       {request.data ? <>
+        {request.data.meta?.unavailableCities?.length ? <Notice tone="warning" title="Partial donor results">These city shards did not respond: {request.data.meta.unavailableCities.join(", ")}. Refresh to retry.</Notice> : null}
         {request.data.truncated ? <Notice tone="warning" title="Results are capped per city">{formatNumber(donors.length)} of {formatNumber(totalMatched)} matching donors are listed. {Object.entries(byCity).map(([code, count]) => `${code}: ${formatNumber(count)}`).join(" · ")}. Narrow the city or blood group filter to see the rest.</Notice> : null}
         <div className="stat-grid">
           <div className="stat-card stat-card-blue"><span>Donors matched</span><strong>{formatNumber(totalMatched)}</strong><small>Across the selected shards</small></div>
           <div className="stat-card stat-card-green"><span>Listed here</span><strong>{formatNumber(donors.length)}</strong><small>{request.data.truncated ? "Capped at 100 per city" : "Complete result set"}</small></div>
-          <div className="stat-card stat-card-purple"><span>City shards</span><strong>{cityCount}</strong><small>With at least one donor</small></div>
+          <div className="stat-card stat-card-purple"><span>City shards</span><strong>{cityCount}</strong><small>Searched shards</small></div>
           <div className="stat-card stat-card-amber"><span>Available in view</span><strong>{formatNumber(availableCount)}</strong><small>Of the listed rows</small></div>
         </div>
         <SectionCard title="Donor profiles" description="Donor records live in each city's history schema, so a profile is only visible from the shard that owns it.">
           {pageDonors.length ? <>
-            <div className="table-wrap"><table className="data-table"><thead><tr><th>Donor</th><th>Blood type</th><th>City</th><th>Availability</th><th>Last donation</th><th>Age</th><th>Weight</th><th>Phone</th><th>Donor ID</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{pageDonors.map((donor) => <tr key={donor.donorId}><td><strong>{donor.fullName}</strong></td><td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td><td>{donor.cityCode}</td><td><AvailabilityBadge available={Boolean(donor.isAvailable)} /></td><td>{formatDate(donor.lastDonationDate)}</td><td>{ageFromDate(donor.dateOfBirth) ?? "—"}</td><td>{formatNumber(donor.weightKg)} kg</td><td className="mono-text">{donor.phone || "—"}</td><td className="mono-text">{donor.donorId?.slice(0, 8)}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ id: donor.donorId, city: donor.cityCode, name: donor.fullName }); }}>Delete</Button></td></tr>)}</tbody></table></div>
+            <div className="table-wrap"><table className="data-table"><thead><tr><th>Donor</th><th>Blood type</th><th>City</th><th>Availability</th><th>Last donation</th><th>Age</th><th>Weight</th><th>Phone</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{pageDonors.map((donor) => <tr key={donor.donorId}><td><strong>{donor.fullName}</strong></td><td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td><td>{donor.cityCode}</td><td><AvailabilityBadge available={Boolean(donor.isAvailable)} /></td><td>{formatDate(donor.lastDonationDate)}</td><td>{ageFromDate(donor.dateOfBirth) ?? "—"}</td><td>{formatNumber(donor.weightKg)} kg</td><td className="mono-text">{donor.phone || "—"}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ id: donor.donorId, city: donor.cityCode, name: donor.fullName }); }}>Delete</Button></td></tr>)}</tbody></table></div>
             <PaginationControls page={page} pageSize={pageSize} totalItems={donors.length} onPageChange={setPage} />
           </> : <EmptyState title="No donors matched">Adjust the filters, or register a donor profile from the donor sign-up page.</EmptyState>}
         </SectionCard>
@@ -207,6 +230,8 @@ export function DonorDirectoryPage() {
 
 export function HospitalsBanksPage() {
   const [cityFilter, setCityFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
   const [entity, setEntity] = useState("hospital");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [form, setForm] = useState({ cityCode: "", name: "", address: "", phone: "", latitude: "", longitude: "" });
@@ -217,8 +242,14 @@ export function HospitalsBanksPage() {
   const [deleteError, setDeleteError] = useState(null);
   const hospitalPagination = usePagination({ defaultLimit: 20 });
   const bankPagination = usePagination({ defaultLimit: 20 });
-  const hospitals = useRequest(() => api.catalog.hospitals(cityFilter ? { city: cityFilter } : undefined), [cityFilter]);
-  const banks = useRequest(() => api.catalog.bloodBanks(cityFilter ? { city: cityFilter } : undefined), [cityFilter]);
+  const hospitals = useRequest(
+    () => api.catalog.hospitals({ ...(cityFilter ? { city: cityFilter } : {}), ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}) }),
+    [cityFilter, debouncedSearch],
+  );
+  const banks = useRequest(
+    () => api.catalog.bloodBanks({ ...(cityFilter ? { city: cityFilter } : {}), ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}) }),
+    [cityFilter, debouncedSearch],
+  );
   const hospitalRows = listFrom(hospitals.data, ["hospitals"]);
   const bankRows = listFrom(banks.data, ["bloodBanks"]);
   const pageSize = hospitalPagination.limit;
@@ -232,7 +263,7 @@ export function HospitalsBanksPage() {
 
   function openCreateModal(nextEntity) {
     setEntity(nextEntity);
-    setForm({ cityCode: cityFilter, name: "", address: "", phone: "", latitude: "", longitude: "" });
+    setForm({ cityCode: cityFilter, name: "", address: "", phone: "", latitude: "", longitude: "", username: "", email: "", password: "" });
     setErrors({});
     setAction({ loading: false, error: null, success: null });
     setShowCreateModal(true);
@@ -271,7 +302,7 @@ export function HospitalsBanksPage() {
 
   async function submit(event) {
     event.preventDefault();
-    const nextErrors = validate(form, FACILITY_RULES);
+    const nextErrors = validate(form, entity === "hospital" ? HOSPITAL_RULES : BLOOD_BANK_RULES);
     setErrors(nextErrors);
     if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
@@ -285,15 +316,15 @@ export function HospitalsBanksPage() {
     };
     try {
       if (entity === "hospital") {
-        await api.system.createHospital(body);
-        setAction({ loading: false, error: null, success: `Hospital "${form.name}" created in ${form.cityCode}.` });
+        await api.system.createHospital({ ...body, username: form.username, email: form.email, password: form.password });
+        setAction({ loading: false, error: null, success: `Hospital "${form.name}" and its admin account were created in ${form.cityCode}.` });
         hospitals.reload();
       } else {
-        await api.system.createBloodBank(body);
-        setAction({ loading: false, error: null, success: `Blood bank "${form.name}" created in ${form.cityCode}.` });
+        await api.system.createBloodBank({ ...body, username: form.username, email: form.email, password: form.password });
+        setAction({ loading: false, error: null, success: `Blood bank "${form.name}" and its admin account were created in ${form.cityCode}.` });
         banks.reload();
       }
-      setForm({ cityCode: "", name: "", address: "", phone: "", latitude: "", longitude: "" });
+      setForm({ cityCode: "", name: "", address: "", phone: "", latitude: "", longitude: "", username: "", email: "", password: "" });
       setShowCreateModal(false);
     } catch (error) {
       setAction({ loading: false, error, success: null });
@@ -305,11 +336,19 @@ export function HospitalsBanksPage() {
       <PageHeader
         eyebrow="System workspace"
         title="Hospitals &amp; blood banks"
-        description="Register the facilities that hospital and blood-bank admin accounts are attached to. A facility must exist before its admin account can be created."
+        description="Registering a hospital or blood bank also creates its first facility admin account."
         actions={<><Button variant="secondary" onClick={() => openCreateModal("hospital")}>Add hospital</Button><Button onClick={() => openCreateModal("bloodBank")}>Add blood bank</Button></>}
       />
       {action.success ? <Notice tone="success" title="Facility created">{action.success}</Notice> : null}
-      <SectionCard title="City filter" description="Both lists read the shared catalog and are visible to every authenticated user.">
+      <SectionCard title="Search & filters" description="Search facility name, address, or phone and optionally filter both lists by city.">
+        <div className="form-grid form-grid-two">
+          <Field label="Search hospitals and banks">
+            <input value={search} onChange={(event) => {
+              setSearch(event.target.value);
+              hospitalPagination.resetPage();
+              bankPagination.resetPage();
+            }} placeholder="Facility name, address, or phone" />
+          </Field>
           <Field label="City shard">
             <select value={cityFilter} onChange={(event) => {
               setCityFilter(event.target.value);
@@ -320,6 +359,7 @@ export function HospitalsBanksPage() {
               {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
             </select>
           </Field>
+        </div>
       </SectionCard>
       <SectionCard title="Hospitals" description="Active hospital records in the catalog.">
         {hospitals.loading ? <LoadingState label="Loading hospitals" /> : null}
@@ -348,6 +388,12 @@ export function HospitalsBanksPage() {
           <Field label="Name" hint="Required" error={errors.name}><input value={form.name} onChange={(event) => update("name", event.target.value)} placeholder={entity === "hospital" ? "e.g. Lahore General Hospital" : "e.g. Central Blood Bank"} /></Field>
           <Field label="Address" error={errors.address}><input value={form.address} onChange={(event) => update("address", event.target.value)} placeholder="Street address" /></Field>
           <Field label="Phone" error={errors.phone}><input value={form.phone} onChange={(event) => update("phone", event.target.value)} placeholder="+92-000-0000000" /></Field>
+          <>
+            <div className="auth-role-note"><span className="info-mark"><Icon name="shield" size={13} /></span><span>{entity === "hospital" ? "Hospital Admin" : "Blood-bank Admin"} portal login</span></div>
+            <Field label="Admin username" hint="Required, unique" error={errors.username}><input autoComplete="username" value={form.username} onChange={(event) => update("username", event.target.value)} placeholder="hospital.admin" /></Field>
+            <Field label="Admin email" hint="Required, unique" error={errors.email}><input type="email" autoComplete="email" value={form.email} onChange={(event) => update("email", event.target.value)} placeholder="admin@hospital.example" /></Field>
+            <Field label="Admin password" hint="At least 8 characters" error={errors.password}><input type="password" autoComplete="new-password" value={form.password} onChange={(event) => update("password", event.target.value)} placeholder="Create a password" /></Field>
+          </>
           <div className="form-grid form-grid-two">
             <Field label="Latitude" error={errors.latitude}><input type="number" step="any" value={form.latitude} onChange={(event) => update("latitude", event.target.value)} placeholder="31.520400" /></Field>
             <Field label="Longitude" error={errors.longitude}><input type="number" step="any" value={form.longitude} onChange={(event) => update("longitude", event.target.value)} placeholder="74.358700" /></Field>
@@ -375,20 +421,24 @@ export function HospitalsBanksPage() {
 }
 
 const USER_ROLE_OPTIONS = [
-  { value: "HOSPITAL_ADMIN", label: "Hospital admin", needs: "hospitalId" },
-  { value: "BLOODBANK_ADMIN", label: "Blood bank admin", needs: "bloodBankId" },
-  { value: "DONOR", label: "Donor", needs: "donorId" },
-  { value: "SYSTEM_ADMIN", label: "System admin", needs: null },
+  { value: "DONOR", label: "Donor" },
+  { value: "SYSTEM_ADMIN", label: "System admin" },
 ];
 
 export function UsersPage() {
-  const [form, setForm] = useState({ username: "", email: "", password: "", role: "HOSPITAL_ADMIN", facilityId: "", donorCity: "" });
+  const [form, setForm] = useState({ username: "", email: "", password: "", role: "DONOR", facilityId: "", donorCity: "" });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
+  const [cityFilter, setCityFilter] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
+  const { page, limit, setPage, resetPage } = usePagination({ defaultLimit: 25 });
   const { errors, setErrors, clearError } = useFieldErrors();
-  const users = useRequest(() => api.system.listUsers(), []);
-  const hospitals = useRequest(() => api.catalog.hospitals(), []);
-  const banks = useRequest(() => api.catalog.bloodBanks(), []);
+  const users = useRequest(
+    () => api.system.listUsers({ page, limit, ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}), ...(cityFilter ? { city: cityFilter } : {}), ...(roleFilter ? { role: roleFilter } : {}) }),
+    [page, limit, debouncedSearch, cityFilter, roleFilter],
+  );
   const donors = useRequest(
     () => form.role === "DONOR" && form.donorCity
       ? api.search.donors({ city: form.donorCity, limit: 100 })
@@ -396,10 +446,7 @@ export function UsersPage() {
     [form.role, form.donorCity],
   );
   const userRows = listFrom(users.data, ["users"]);
-  const hospitalRows = listFrom(hospitals.data, ["hospitals"]);
-  const bankRows = listFrom(banks.data, ["bloodBanks"]);
   const donorRows = listFrom(donors.data, ["donors"]);
-  const selected = USER_ROLE_OPTIONS.find((option) => option.value === form.role);
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
@@ -407,6 +454,8 @@ export function UsersPage() {
   }
 
   function openCreateModal() {
+    setForm({ username: "", email: "", password: "", role: "DONOR", facilityId: "", donorCity: "" });
+    setErrors({});
     setAction({ loading: false, error: null, success: null });
     setShowCreateModal(true);
   }
@@ -418,16 +467,12 @@ export function UsersPage() {
   async function submit(event) {
     event.preventDefault();
     const nextErrors = validate(form, USER_RULES);
-    if (form.role === "HOSPITAL_ADMIN" && !form.facilityId) nextErrors.facilityId = "Hospital is required.";
-    if (form.role === "BLOODBANK_ADMIN" && !form.facilityId) nextErrors.facilityId = "Blood bank is required.";
     if (form.role === "DONOR" && !form.facilityId) nextErrors.facilityId = "Select a donor profile.";
     if (form.role === "DONOR" && !form.donorCity) nextErrors.donorCity = "Donor city shard is required.";
     setErrors(nextErrors);
     if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     const body = { username: form.username, email: form.email, password: form.password, role: form.role };
-    if (form.role === "HOSPITAL_ADMIN") body.hospitalId = form.facilityId;
-    if (form.role === "BLOODBANK_ADMIN") body.bloodBankId = form.facilityId;
     if (form.role === "DONOR") {
       body.donorId = form.facilityId;
       body.donorCityCode = form.donorCity;
@@ -435,17 +480,14 @@ export function UsersPage() {
     try {
       const created = await api.system.createUser(body);
       setAction({ loading: false, error: null, success: `Account "${created.user?.username || form.username}" created. It can sign in at /login immediately.` });
-      setForm({ username: "", email: "", password: "", role: "HOSPITAL_ADMIN", facilityId: "", donorCity: "" });
+      setForm({ username: "", email: "", password: "", role: "DONOR", facilityId: "", donorCity: "" });
       setShowCreateModal(false);
+      resetPage();
       users.reload();
     } catch (error) {
       setAction({ loading: false, error, success: null });
     }
   }
-
-  const facilityOptions = form.role === "HOSPITAL_ADMIN"
-    ? hospitalRows.map((row) => ({ value: row.hospitalId, label: `${row.name} · ${row.cityCode}` }))
-    : bankRows.map((row) => ({ value: row.bloodBankId, label: `${row.name} · ${row.cityCode}` }));
 
   return (
     <div className="page-stack">
@@ -456,10 +498,46 @@ export function UsersPage() {
         actions={<><Button variant="secondary" onClick={users.reload} disabled={users.loading}>Refresh list</Button><Button onClick={openCreateModal}>Add user</Button></>}
       />
       {action.success ? <Notice tone="success" title="Account created">{action.success}</Notice> : null}
-      <SectionCard title="Account directory" description="All portal identities across every city shard.">
+      <SectionCard title="Account directory" description="All portal identities across every city shard. Donor example emails are generated placeholders, not contact addresses.">
+        <div className="form-grid form-grid-three user-directory-filters">
+          <Field label="Search users">
+            <input value={search} onChange={(event) => { setSearch(event.target.value); resetPage(); }} placeholder="Search username, email, or facility" />
+          </Field>
+          <Field label="City shard">
+            <select value={cityFilter} onChange={(event) => { setCityFilter(event.target.value); resetPage(); }}>
+              <option value="">All cities</option>
+              {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Role">
+            <select value={roleFilter} onChange={(event) => { setRoleFilter(event.target.value); resetPage(); }}>
+              <option value="">All roles</option>
+              {[
+                ["DONOR", "Donor"],
+                ["SYSTEM_ADMIN", "System admin"],
+                ["HOSPITAL_ADMIN", "Hospital admin"],
+                ["BLOODBANK_ADMIN", "Blood-bank admin"],
+              ].map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </Field>
+        </div>
         {users.loading ? <LoadingState label="Loading accounts" /> : null}
         {users.error ? <ErrorState error={users.error} onRetry={users.reload} /> : null}
-        {!users.loading && !users.error ? userRows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Scope</th><th>Status</th><th>Created</th></tr></thead><tbody>{userRows.map((row) => <tr key={row.userId}><td><strong>{row.username}</strong></td><td><RoleBadge role={row.role} /></td><td>{row.email}</td><td className="mono-text">{row.hospitalId ? `Hospital ${row.hospitalId.slice(0, 8)}` : row.bloodBankId ? `Bank ${row.bloodBankId.slice(0, 8)}` : row.donorId ? `Donor ${row.donorCityCode} / ${row.donorId.slice(0, 8)}` : "All cities"}</td><td><StatusBadge status={row.isActive === false ? "INACTIVE" : "ACTIVE"} /></td><td>{formatDateTime(row.createdAt)}</td></tr>)}</tbody></table></div> : <EmptyState title="No accounts yet">Create the first account with the Add user button.</EmptyState> : null}
+        {!users.loading && !users.error ? userRows.length ? <>
+          <div className="table-wrap"><table className="data-table"><thead><tr><th>Name / username</th><th>Role</th><th>Email</th><th>Scope</th><th>Status</th><th>Created</th></tr></thead><tbody>{userRows.map((row) => {
+            const donorEmailName = row.donorName
+              ?.normalize("NFKD")
+              .replace(/[\u0300-\u036f]/g, "")
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, ".")
+              .replace(/^\.+|\.+$/g, "");
+            const email = row.role === "DONOR" && row.email?.endsWith("@donors.example.test")
+              ? `${donorEmailName || "donor"}.${row.donorId?.slice(0, 8) || row.userId.slice(0, 8)}@donors.example.test`
+              : row.email;
+            return <tr key={row.userId}><td><strong>{row.donorName || (row.role === "DONOR" ? "Donor profile unavailable" : row.username)}</strong></td><td><RoleBadge role={row.role} /></td><td>{email}</td><td>{row.hospitalId ? `Hospital ${row.hospitalId.slice(0, 8)}` : row.bloodBankId ? `Bank ${row.bloodBankId.slice(0, 8)}` : row.role === "DONOR" ? `Donor · ${row.donorCityCode}` : "All cities"}</td><td><StatusBadge status={row.isActive === false ? "INACTIVE" : "ACTIVE"} /></td><td>{formatDateTime(row.createdAt)}</td></tr>;
+          })}</tbody></table></div>
+          <PaginationControls page={page} pageSize={limit} totalItems={users.data?.total ?? userRows.length} onPageChange={setPage} />
+        </> : <EmptyState title="No users matched">Change the search or city filter and try again.</EmptyState> : null}
       </SectionCard>
       <Modal open={showCreateModal} title="Add user" onClose={closeCreateModal}>
         <form className="stack-form" noValidate onSubmit={submit}>
@@ -489,15 +567,7 @@ export function UsersPage() {
                 </select>
               </Field>
             </div>
-          ) : selected?.needs ? (
-            <Field label={form.role === "HOSPITAL_ADMIN" ? "Hospital" : "Blood bank"} hint={form.role === "HOSPITAL_ADMIN" ? "Required" : "Required"} error={errors.facilityId}>
-              <select value={form.facilityId} onChange={(event) => update("facilityId", event.target.value)}>
-                <option value="">{facilityOptions.length ? "Select a facility" : `No ${form.role === "HOSPITAL_ADMIN" ? "hospitals" : "blood banks"} registered yet`}</option>
-                {facilityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
-            </Field>
           ) : null}
-          {selected?.needs && !facilityOptions.length && form.role !== "DONOR" ? <span className="field-hint">Register a facility on the Hospitals &amp; banks page first.</span> : null}
           {action.error ? <Notice tone="error" title="Could not create account">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
           <div className="facility-form-actions">
             <Button variant="secondary" onClick={closeCreateModal} disabled={action.loading}>Cancel</Button>

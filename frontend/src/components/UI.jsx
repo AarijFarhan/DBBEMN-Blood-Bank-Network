@@ -281,11 +281,11 @@ export function Field({ label, hint, error, children, className = "" }) {
   );
 }
 
-export function Modal({ open, title, onClose, children, footer }) {
+export function Modal({ open, title, onClose, children, footer, className = "" }) {
   if (!open) return null;
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <div className={`modal ${className}`.trim()} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
           <h2>{title}</h2>
           <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><Icon name="plus" size={18} className="icon-close" /></button>

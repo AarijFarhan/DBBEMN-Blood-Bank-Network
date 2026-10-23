@@ -26,6 +26,7 @@ export function DonorProfilePage() {
   const request = useRequest(() => donorId ? api.donors.get(donorId) : Promise.reject(new Error("Your account is not linked to a donor profile.")), [donorId]);
   const donor = request.data?.donor;
   const isAvailable = Boolean(donor?.isAvailable);
+  const isSample = donor?.fullName?.startsWith("[SAMPLE]");
 
   async function toggleAvailability() {
     if (!donorId) return;
@@ -41,7 +42,8 @@ export function DonorProfilePage() {
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Donor workspace" title="My profile" description="Keep your contact and availability signals current for nearby blood banks." actions={<Button variant={isAvailable ? "secondary" : "primary"} onClick={toggleAvailability} disabled={action.loading || request.loading}>{action.loading ? "Saving…" : isAvailable ? "Pause availability" : "Make available"}</Button>} />
+      <PageHeader eyebrow="Donor workspace" title="My profile" description="Keep your contact and availability signals current for nearby blood banks." actions={<Button variant={isAvailable ? "secondary" : "primary"} onClick={toggleAvailability} disabled={action.loading || request.loading || isSample}>{isSample ? "Sample profile" : action.loading ? "Saving…" : isAvailable ? "Pause availability" : "Make available"}</Button>} />
+      {isSample ? <Notice tone="warning" title="Sample donor account">This synthetic profile is for display only. It cannot be made available for real donation requests.</Notice> : null}
       {action.success ? <Notice tone="success" title="Availability updated">{action.success}</Notice> : null}{action.error ? <Notice tone="error" title="Could not update availability">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
       {request.loading ? <SectionCard><LoadingState label="Loading donor profile" /></SectionCard> : null}
       {request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}
@@ -56,7 +58,7 @@ export function DonorProfilePage() {
 export function DonorDonationsPage() {
   const { user } = useAuth();
   const donorId = user?.donorId;
-  const request = useRequest(() => donorId ? api.donations.list({ donorId, limit: 100 }) : Promise.reject(new Error("Your account is not linked to a donor profile.")), [donorId]);
+  const request = useRequest(() => donorId ? api.donations.list({ donorId, limit: 50 }) : Promise.reject(new Error("Your account is not linked to a donor profile.")), [donorId]);
   const donations = listFrom(request.data, ["donations"]);
   const passed = useMemo(() => donations.filter((donation) => donation.screeningStatus === "PASSED").length, [donations]);
   return (
@@ -64,7 +66,7 @@ export function DonorDonationsPage() {
       <PageHeader eyebrow="Donor workspace" title="Donation history" description="A private history of collections recorded against your donor profile." />
       <div className="stat-grid"><div className="stat-card stat-card-blue"><span>Total collections</span><strong>{donations.length}</strong><small>Recorded history</small></div><div className="stat-card stat-card-green"><span>Passed screening</span><strong>{passed}</strong><small>Completed checks</small></div><div className="stat-card stat-card-amber"><span>Pending review</span><strong>{donations.length - passed}</strong><small>Awaiting bank result</small></div></div>
       <SectionCard title="Collection timeline" description="Use a pseudonymous reference for any follow-up with a blood bank.">
-        {request.loading ? <LoadingState label="Loading donation history" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? donations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Collected</th><th>Volume</th><th>Screening</th><th>Bank</th><th>Donation ID</th></tr></thead><tbody>{donations.map((donation) => <tr key={donation.donationId}><td>{formatDateTime(donation.collectedAt)}</td><td>{formatNumber(donation.volumeMl)} ml</td><td><StatusBadge status={donation.screeningStatus} /></td><td className="mono-text">{donation.bloodBankId?.slice(0, 12)}</td><td className="mono-text">{donation.donationId?.slice(0, 12)}</td></tr>)}</tbody></table></div> : <EmptyState title="No donations yet">Your completed and pending collections will appear here.</EmptyState> : null}
+        {request.loading ? <LoadingState label="Loading donation history" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? donations.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Collected</th><th>Volume</th><th>Screening</th><th>Bank</th><th>Donation ID</th></tr></thead><tbody>{donations.map((donation) => <tr key={donation.donationId}><td>{formatDateTime(donation.collectedAt)}{donation.notes?.startsWith("[SAMPLE DATA]") ? <small><StatusBadge status="SIMULATED" /></small> : null}</td><td>{formatNumber(donation.volumeMl)} ml</td><td><StatusBadge status={donation.screeningStatus} /></td><td className="mono-text">{donation.bloodBankId?.slice(0, 12)}</td><td className="mono-text">{donation.donationId?.slice(0, 12)}</td></tr>)}</tbody></table></div> : <EmptyState title="No donations yet">Your completed and pending collections will appear here.</EmptyState> : null}
       </SectionCard>
     </div>
   );

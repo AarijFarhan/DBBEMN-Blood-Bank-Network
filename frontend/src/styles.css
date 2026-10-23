@@ -218,7 +218,7 @@ button:focus-visible, a:focus-visible, .nav-item:focus-visible { outline: none; 
   transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 .nav-item:hover { background: rgba(255, 255, 255, 0.07); color: #fff; }
-.nav-item > span:last-child { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.nav-item-copy { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .nav-item strong { font-size: 13.5px; font-weight: 600; }
 .nav-item small { font-size: 11px; color: #7d89a9; }
 .nav-item:hover small { color: #a6b1cc; }
@@ -381,6 +381,30 @@ button:focus-visible, a:focus-visible, .nav-item:focus-visible { outline: none; 
 }
 
 .sidebar-overlay { display: none; }
+.nav-notification {
+  flex: 0 0 auto;
+  min-width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: #fff;
+  background: #dc3f45;
+  box-shadow: 0 0 0 0 rgba(220, 63, 69, 0.45);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  margin-left: auto;
+  animation: donor-request-blink 1.15s ease-in-out infinite;
+}
+@keyframes donor-request-blink {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(220, 63, 69, 0.4); }
+  50% { opacity: 0.55; box-shadow: 0 0 0 5px rgba(220, 63, 69, 0.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-notification { animation: none; }
+}
 
 /* ==========================================================================
    Buttons
@@ -650,6 +674,9 @@ button:focus-visible, a:focus-visible, .nav-item:focus-visible { outline: none; 
 .field-label { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
 .field-hint { font-size: 11.5px; color: var(--muted); }
 .field-error { font-size: 11.5px; color: var(--red); font-weight: 500; }
+.search-input-wrap { position: relative; display: block; }
+.search-input-wrap > .icon { position: absolute; top: 50%; left: 13px; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.search-input-wrap > input { width: 100%; padding-left: 40px; }
 .field-invalid > input,
 .field-invalid > select,
 .field-invalid > textarea { border-color: var(--red); background: var(--red-soft); }
@@ -1288,6 +1315,7 @@ button:focus-visible, a:focus-visible, .nav-item:focus-visible { outline: none; 
   box-shadow: var(--shadow-lg);
   animation: modal-in 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
 }
+.modal-wide { width: min(900px, 100%); }
 @keyframes modal-in { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
 
 .modal-header {

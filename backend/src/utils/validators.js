@@ -42,6 +42,14 @@ export const catalogEntitySchema = z.object({
   phone: z.string().trim().max(40).nullable().optional(),
 });
 
+export const createHospitalWithAdminSchema = catalogEntitySchema.extend({
+  username: z.string().trim().min(3).max(50),
+  email: z.string().trim().email().max(254),
+  password: passwordSchema,
+});
+
+export const createBloodBankWithAdminSchema = createHospitalWithAdminSchema;
+
 export const createUserSchema = z.object({
   username: z.string().trim().min(3).max(50),
   email: z.string().trim().email().max(254),
@@ -77,6 +85,10 @@ export const respondDonorRequestSchema = z.object({
 export const donorRequestQuerySchema = z.object({
   city: cityCodeSchema.optional(),
   status: z.enum(["PENDING", "ACCEPTED", "DECLINED", "CANCELLED", "EXPIRED"]).optional(),
+  donorIds: z.preprocess(
+    (value) => value === undefined ? undefined : Array.isArray(value) ? value : [value],
+    z.array(uuidSchema).max(500).optional(),
+  ),
   limit: z.coerce.number().int().min(1).max(50).default(25),
   page: z.coerce.number().int().min(1).default(1),
 });

@@ -9,10 +9,20 @@ import { authenticate, requireRole } from "../middleware/auth.js";
 import { AppError, asyncRoute } from "../middleware/errors.js";
 import { parseQuery } from "../middleware/validate.js";
 import { validate } from "../middleware/validate.js";
-import { catalogEntitySchema, cityCodeSchema, createUserSchema, donorDeleteQuerySchema, entityIdParamSchema } from "../utils/validators.js";
+import { cityCodeSchema, createBloodBankWithAdminSchema, createHospitalWithAdminSchema, createUserSchema, donorDeleteQuerySchema, entityIdParamSchema } from "../utils/validators.js";
 
 const router = Router();
-const cityQuerySchema = z.object({ city: cityCodeSchema.optional() });
+const cityQuerySchema = z.object({
+  city: cityCodeSchema.optional(),
+  search: z.string().trim().max(100).optional(),
+});
+const adminUsersQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  search: z.string().trim().max(100).optional(),
+  city: cityCodeSchema.optional(),
+  role: z.enum(["SYSTEM_ADMIN", "HOSPITAL_ADMIN", "BLOODBANK_ADMIN", "DONOR"]).optional(),
+});
 
 function sagaLog(event) {
   const detail = event.error ? ` (${event.error})` : "";
@@ -118,14 +128,18 @@ router.get(
 router.get(
   "/hospitals",
   asyncRoute(async (req, res) => {
-    const { city } = parseQuery(cityQuerySchema, req.query);
+    const { city, search } = parseQuery(cityQuerySchema, req.query);
     const result = await getCatalogPool().query(
       `SELECT hospital_id AS "hospitalId", name, city_code AS "cityCode",
               address, latitude, longitude, phone
        FROM catalog.hospitals
-       WHERE is_active AND ($1::char(3) IS NULL OR city_code = $1)
+       WHERE is_active
+         AND ($1::char(3) IS NULL OR city_code = $1)
+         AND ($2::text IS NULL OR name ILIKE '%' || $2 || '%'
+              OR COALESCE(address, '') ILIKE '%' || $2 || '%'
+              OR COALESCE(phone, '') ILIKE '%' || $2 || '%')
        ORDER BY city_code, name`,
-      [city ?? null],
+      [city ?? null, search || null],
     );
     res.json({ hospitals: result.rows });
   }),
@@ -134,14 +148,18 @@ router.get(
 router.get(
   "/blood-banks",
   asyncRoute(async (req, res) => {
-    const { city } = parseQuery(cityQuerySchema, req.query);
+    const { city, search } = parseQuery(cityQuerySchema, req.query);
     const result = await getCatalogPool().query(
       `SELECT blood_bank_id AS "bloodBankId", name, city_code AS "cityCode",
               address, latitude, longitude, phone
        FROM catalog.blood_banks
-       WHERE is_active AND ($1::char(3) IS NULL OR city_code = $1)
+       WHERE is_active
+         AND ($1::char(3) IS NULL OR city_code = $1)
+         AND ($2::text IS NULL OR name ILIKE '%' || $2 || '%'
+              OR COALESCE(address, '') ILIKE '%' || $2 || '%'
+              OR COALESCE(phone, '') ILIKE '%' || $2 || '%')
        ORDER BY city_code, name`,
-      [city ?? null],
+      [city ?? null, search || null],
     );
     res.json({ bloodBanks: result.rows });
   }),
@@ -152,22 +170,71 @@ router.get(
   authenticate,
   requireRole("SYSTEM_ADMIN"),
   asyncRoute(async (req, res) => {
-    const page = Math.max(1, parseInt(req.query.page ?? "1", 10) || 1);
-    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? "25", 10) || 25));
+    const { page, limit, search, city, role } = parseQuery(adminUsersQuerySchema, req.query);
     const offset = (page - 1) * limit;
-    const result = await getCatalogPool().query(
-      `SELECT user_id AS "userId", username, email, role,
-              hospital_id AS "hospitalId", blood_bank_id AS "bloodBankId",
-              donor_id AS "donorId", donor_city_code AS "donorCityCode",
-              is_active AS "isActive", created_at AS "createdAt"
-       FROM catalog.users
-       ORDER BY role, username
-       LIMIT $1 OFFSET $2`,
-      [limit + 1, offset],
+    const values = [search || null, city ?? null, role ?? null];
+    const filter = `($1::text IS NULL
+         OR u.username ILIKE '%' || $1 || '%'
+         OR u.email ILIKE '%' || $1 || '%'
+         OR h.name ILIKE '%' || $1 || '%'
+         OR b.name ILIKE '%' || $1 || '%')
+       AND ($2::char(3) IS NULL OR COALESCE(h.city_code, b.city_code, u.donor_city_code) = $2)
+       AND ($3::text IS NULL OR u.role = $3)`;
+    const catalog = getCatalogPool();
+    const [result, count] = await Promise.all([
+      catalog.query(
+        `SELECT u.user_id AS "userId", u.username, u.email, u.role,
+              u.hospital_id AS "hospitalId", u.blood_bank_id AS "bloodBankId",
+              u.donor_id AS "donorId", u.donor_city_code AS "donorCityCode",
+              COALESCE(h.city_code, b.city_code, u.donor_city_code) AS "cityCode",
+              u.is_active AS "isActive", u.created_at AS "createdAt"
+         FROM catalog.users u
+         LEFT JOIN catalog.hospitals h ON h.hospital_id = u.hospital_id
+         LEFT JOIN catalog.blood_banks b ON b.blood_bank_id = u.blood_bank_id
+         WHERE ${filter}
+         ORDER BY u.role, u.username
+         LIMIT $4 OFFSET $5`,
+        [...values, limit, offset],
+      ),
+      catalog.query(
+        `SELECT count(*)::int AS total
+         FROM catalog.users u
+         LEFT JOIN catalog.hospitals h ON h.hospital_id = u.hospital_id
+         LEFT JOIN catalog.blood_banks b ON b.blood_bank_id = u.blood_bank_id
+         WHERE ${filter}`,
+        values,
+      ),
+    ]);
+    const total = count.rows[0]?.total ?? 0;
+    const donorIdsByCity = new Map();
+    for (const user of result.rows) {
+      if (user.role !== "DONOR" || !user.donorId || !user.donorCityCode) continue;
+      const cityCode = user.donorCityCode.trim();
+      if (!donorIdsByCity.has(cityCode)) donorIdsByCity.set(cityCode, []);
+      donorIdsByCity.get(cityCode).push(user.donorId);
+    }
+    const donorNames = new Map();
+    await Promise.all(
+      [...donorIdsByCity].map(async ([cityCode, donorIds]) => {
+        const { hist } = schemasFor(cityCode);
+        const donors = await getPoolForCity(cityCode).query(
+          `SELECT donor_id AS "donorId", full_name AS "fullName"
+           FROM ${hist}.donors
+           WHERE donor_id = ANY($1::uuid[])`,
+          [donorIds],
+        );
+        for (const donor of donors.rows) {
+          donorNames.set(`${cityCode}:${donor.donorId}`, donor.fullName);
+        }
+      }),
     );
-    const hasMore = result.rows.length > limit;
-    const users = hasMore ? result.rows.slice(0, limit) : result.rows;
-    res.json({ users, page, limit, hasMore });
+    const users = result.rows.map((user) => ({
+      ...user,
+      donorName: user.role === "DONOR"
+        ? donorNames.get(`${user.donorCityCode?.trim()}:${user.donorId}`) ?? null
+        : null,
+    }));
+    res.json({ users, page, limit, total, hasMore: offset + result.rows.length < total });
   }),
 );
 
@@ -175,25 +242,48 @@ router.post(
   "/admin/hospitals",
   authenticate,
   requireRole("SYSTEM_ADMIN"),
-  validate(catalogEntitySchema),
+  validate(createHospitalWithAdminSchema),
   asyncRoute(async (req, res) => {
     const body = req.body;
-    const result = await getCatalogPool().query(
-      `INSERT INTO catalog.hospitals
-         (name, city_code, address, latitude, longitude, phone)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING hospital_id AS "hospitalId", name, city_code AS "cityCode",
-                 address, latitude, longitude, phone, is_active AS "isActive"`,
-      [
-        body.name,
-        body.cityCode,
-        body.address ?? null,
-        body.latitude ?? null,
-        body.longitude ?? null,
-        body.phone ?? null,
-      ],
-    );
-    res.status(201).json({ hospital: result.rows[0] });
+    const passwordHash = await bcrypt.hash(body.password, 12);
+    const client = await getCatalogPool().connect();
+    try {
+      await client.query("BEGIN");
+      const hospitalResult = await client.query(
+        `INSERT INTO catalog.hospitals
+           (name, city_code, address, latitude, longitude, phone)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING hospital_id AS "hospitalId", name, city_code AS "cityCode",
+                   address, latitude, longitude, phone, is_active AS "isActive"`,
+        [
+          body.name,
+          body.cityCode,
+          body.address ?? null,
+          body.latitude ?? null,
+          body.longitude ?? null,
+          body.phone ?? null,
+        ],
+      );
+      const hospital = hospitalResult.rows[0];
+      const userResult = await client.query(
+        `INSERT INTO catalog.users
+           (username, email, password_hash, role, hospital_id)
+         VALUES ($1, $2, $3, 'HOSPITAL_ADMIN', $4)
+         RETURNING user_id AS "userId", username, email, role,
+                   hospital_id AS "hospitalId"`,
+        [body.username, body.email, passwordHash, hospital.hospitalId],
+      );
+      await client.query("COMMIT");
+      res.status(201).json({ hospital, user: userResult.rows[0] });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error.code === "23505") {
+        throw new AppError(409, "ACCOUNT_ALREADY_EXISTS", "That username or email is already registered.");
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }),
 );
 
@@ -201,25 +291,48 @@ router.post(
   "/admin/blood-banks",
   authenticate,
   requireRole("SYSTEM_ADMIN"),
-  validate(catalogEntitySchema),
+  validate(createBloodBankWithAdminSchema),
   asyncRoute(async (req, res) => {
     const body = req.body;
-    const result = await getCatalogPool().query(
-      `INSERT INTO catalog.blood_banks
-         (name, city_code, address, latitude, longitude, phone)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING blood_bank_id AS "bloodBankId", name, city_code AS "cityCode",
-                 address, latitude, longitude, phone, is_active AS "isActive"`,
-      [
-        body.name,
-        body.cityCode,
-        body.address ?? null,
-        body.latitude ?? null,
-        body.longitude ?? null,
-        body.phone ?? null,
-      ],
-    );
-    res.status(201).json({ bloodBank: result.rows[0] });
+    const passwordHash = await bcrypt.hash(body.password, 12);
+    const client = await getCatalogPool().connect();
+    try {
+      await client.query("BEGIN");
+      const bankResult = await client.query(
+        `INSERT INTO catalog.blood_banks
+           (name, city_code, address, latitude, longitude, phone)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING blood_bank_id AS "bloodBankId", name, city_code AS "cityCode",
+                   address, latitude, longitude, phone, is_active AS "isActive"`,
+        [
+          body.name,
+          body.cityCode,
+          body.address ?? null,
+          body.latitude ?? null,
+          body.longitude ?? null,
+          body.phone ?? null,
+        ],
+      );
+      const bloodBank = bankResult.rows[0];
+      const userResult = await client.query(
+        `INSERT INTO catalog.users
+           (username, email, password_hash, role, blood_bank_id)
+         VALUES ($1, $2, $3, 'BLOODBANK_ADMIN', $4)
+         RETURNING user_id AS "userId", username, email, role,
+                   blood_bank_id AS "bloodBankId"`,
+        [body.username, body.email, passwordHash, bloodBank.bloodBankId],
+      );
+      await client.query("COMMIT");
+      res.status(201).json({ bloodBank, user: userResult.rows[0] });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error.code === "23505") {
+        throw new AppError(409, "ACCOUNT_ALREADY_EXISTS", "That username or email is already registered.");
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }),
 );
 

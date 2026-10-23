@@ -17,7 +17,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { getCatalogPool, getPoolForCity } from "../db/registry.js";
-import { cacheGet, cacheSet } from "../cache/store.js";
+import { cacheGet, cacheSet, inventoryVersions } from "../cache/store.js";
 import { authenticate, requireRole } from "../middleware/auth.js";
 import { asyncRoute } from "../middleware/errors.js";
 import { parseQuery } from "../middleware/validate.js";
@@ -76,28 +76,65 @@ const STATS_CACHE_TTL_SECONDS = 900;
 const STATS_FRESH_MS = 60_000;
 const cityInflight = new Map();
 
-function cityCacheKey(cityCode, bankId) {
-  return `stats:city:${cityCode}:${bankId ?? "all"}`;
+async function cityCacheKey(cityCode, bankId) {
+  const versions = await inventoryVersions([cityCode]);
+  return `stats:city:v2:${cityCode}:${bankId ?? "all"}:${versions[cityCode]}`;
 }
 
 async function computeCityStats(cityCode, bankId) {
   const { hot, hist } = schemasFor(cityCode);
   const bankFilter = bankId ? " WHERE blood_bank_id = $1" : "";
   const bankValues = bankId ? [bankId] : [];
-  // One connection for all five aggregates, each statement bounded by the
+  // One connection for all six aggregates, each statement bounded by the
   // shard timeout. node-postgres queues queries on a single client, so this
   // costs nothing in latency but stops one dashboard request from holding
   // every slot of a small city pool.
   return withCityStatsClient(cityCode, async (client) => {
-    const matrix = await client.query(
-      `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
-              component_type::text AS "componentType", status::text AS status,
-              count(*)::int AS count
-         FROM ${hot}.blood_units
-         ${bankFilter}
-         GROUP BY 1, 2, 3, 4`,
-      bankValues,
-    );
+    let inventoryDegraded = false;
+    let matrix;
+    let statusRows = null;
+    let unknownStatusRows = 0;
+    try {
+      matrix = await client.query(
+        `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
+                component_type::text AS "componentType", status::text AS status,
+                count(*)::int AS count
+           FROM ${hot}.blood_units
+           ${bankFilter}
+           GROUP BY 1, 2, 3, 4`,
+        bankValues,
+      );
+    } catch (error) {
+      if (error.code !== "22P03") throw error;
+      inventoryDegraded = true;
+      log.warn({ cityCode, err: error.message }, "invalid inventory enum; using status-filtered aggregates");
+      matrix = await client.query(
+        `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
+                component_type::text AS "componentType", 'AVAILABLE'::text AS status,
+                count(*)::int AS count
+           FROM ${hot}.blood_units
+           WHERE status = 'AVAILABLE'${bankId ? " AND blood_bank_id = $1" : ""}
+           GROUP BY 1, 2, 3`,
+        bankValues,
+      );
+      const statusCounts = await client.query(
+        `SELECT count(*)::bigint AS total,
+                count(*) FILTER (WHERE status = 'AVAILABLE')::int AS available,
+                count(*) FILTER (WHERE status = 'RESERVED')::int AS reserved,
+                count(*) FILTER (WHERE status = 'QUARANTINE')::int AS quarantine,
+                count(*) FILTER (WHERE status = 'DISPATCHED')::int AS dispatched,
+                count(*) FILTER (WHERE status = 'TRANSFUSED')::int AS transfused,
+                count(*) FILTER (WHERE status = 'EXPIRED')::int AS expired,
+                count(*) FILTER (WHERE status = 'DISCARDED')::int AS discarded
+         FROM ${hot}.blood_units${bankFilter}`,
+        bankValues,
+      );
+      const counts = statusCounts.rows[0];
+      statusRows = Object.entries(counts)
+        .filter(([status]) => status !== "total")
+        .map(([status, count]) => ({ status: status.toUpperCase(), count }));
+      unknownStatusRows = Number(counts.total) - statusRows.reduce((sum, row) => sum + row.count, 0);
+    }
     const reservations = bankId
       ? await client.query(
           `SELECT r.status::text AS status, r.urgency::text AS urgency, count(*)::int AS count
@@ -151,21 +188,27 @@ async function computeCityStats(cityCode, bankId) {
     return {
       cityCode,
       matrixRows: matrix.rows,
+      statusRows,
+      unknownStatusRows,
       reservationRows: reservations.rows,
       donationsCount: donations.rows[0]?.count ?? 0,
       transfusionsCount: transfusions.rows[0]?.count ?? 0,
+      inventoryDegraded,
       expiry: {
         ...expiry.rows[0],
-        available: matrix.rows.reduce((sum, row) => sum + (row.status === "AVAILABLE" ? row.count : 0), 0),
-        reserved: matrix.rows.reduce((sum, row) => sum + (row.status === "RESERVED" ? row.count : 0), 0),
-        quarantine: matrix.rows.reduce((sum, row) => sum + (row.status === "QUARANTINE" ? row.count : 0), 0),
+        available: statusRows?.find((row) => row.status === "AVAILABLE")?.count
+          ?? matrix.rows.reduce((sum, row) => sum + (row.status === "AVAILABLE" ? row.count : 0), 0),
+        reserved: statusRows?.find((row) => row.status === "RESERVED")?.count
+          ?? matrix.rows.reduce((sum, row) => sum + (row.status === "RESERVED" ? row.count : 0), 0),
+        quarantine: statusRows?.find((row) => row.status === "QUARANTINE")?.count
+          ?? matrix.rows.reduce((sum, row) => sum + (row.status === "QUARANTINE" ? row.count : 0), 0),
       },
     };
   });
 }
 
 async function refreshCityStats(cityCode, bankId) {
-  const key = cityCacheKey(cityCode, bankId);
+  const key = await cityCacheKey(cityCode, bankId);
   const existing = cityInflight.get(key);
   if (existing) return existing;
   const promise = (async () => {
@@ -182,7 +225,7 @@ async function refreshCityStats(cityCode, bankId) {
 }
 
 async function loadCityStats(cityCode, bankId) {
-  const raw = await cacheGet(cityCacheKey(cityCode, bankId));
+  const raw = await cacheGet(await cityCacheKey(cityCode, bankId));
   let cached = null;
   if (raw) {
     try {
@@ -191,7 +234,7 @@ async function loadCityStats(cityCode, bankId) {
       cached = null;
     }
   }
-  if (cached?.savedAt) {
+  if (cached?.savedAt && Array.isArray(cached.matrixRows) && Array.isArray(cached.reservationRows)) {
     if (Date.now() - cached.savedAt < STATS_FRESH_MS) return cached;
     refreshCityStats(cityCode, bankId).catch((error) => {
       log.warn({ err: error.message, cityCode }, "stats background refresh failed; serving cached city");
@@ -222,7 +265,17 @@ router.get(
   asyncRoute(async (req, res) => {
     const cities = await scopedCities(req);
     const bankId = scopedBankId(req);
-    const flags = await getChaosFlags();
+    const [flags, systemCounts] = await Promise.all([
+      getChaosFlags(),
+      req.user.role === "SYSTEM_ADMIN"
+        ? getCatalogPool().query(
+            `SELECT
+               (SELECT count(*)::int FROM catalog.users) AS "userCount",
+               (SELECT count(*)::int FROM catalog.hospitals WHERE is_active) AS "hospitalCount",
+               (SELECT count(*)::int FROM catalog.blood_banks WHERE is_active) AS "bloodBankCount"`,
+          )
+        : Promise.resolve(null),
+    ]);
 
     // Scatter-gather: one round trip per city, isolated failure per city.
     // Cached cities answer without touching PostgreSQL; stale ones are served
@@ -235,6 +288,8 @@ router.get(
     const totals = Object.create(null);
     const byCity = Object.create(null);
     const expiringByCity = Object.create(null);
+    const degradedCities = [];
+    const unknownStatusRowsByCity = Object.create(null);
     const groupTotals = Object.fromEntries(
       BLOOD_GROUPS.flatMap((group) => RH_FACTORS.map((rh) => [`${group}${rh}`, 0])),
     );
@@ -250,15 +305,25 @@ router.get(
         log.warn({ err: outcome.reason.message, cityCode }, "stats shard unavailable");
         return;
       }
-      const { matrixRows, reservationRows, donationsCount, transfusionsCount, expiry } = outcome.value;
+      const { matrixRows, reservationRows, donationsCount, transfusionsCount, inventoryDegraded, expiry } = outcome.value;
+      const { statusRows, unknownStatusRows } = outcome.value;
+      if (inventoryDegraded) {
+        degradedCities.push(cityCode);
+        if (unknownStatusRows > 0) unknownStatusRowsByCity[cityCode] = unknownStatusRows;
+      }
       const cityMatrix = Object.create(null);
       for (const row of matrixRows) {
         const key = `${row.bloodGroup}${row.rhFactor}`;
-        groupTotals[key] = (groupTotals[key] ?? 0) + row.count;
+        if (!statusRows) totals[row.status] = (totals[row.status] ?? 0) + row.count;
+        if (row.status === "AVAILABLE") {
+          groupTotals[key] = (groupTotals[key] ?? 0) + row.count;
+          if (!cityMatrix[row.componentType]) cityMatrix[row.componentType] = Object.create(null);
+          if (!cityMatrix[row.componentType][key]) cityMatrix[row.componentType][key] = 0;
+          cityMatrix[row.componentType][key] += row.count;
+        }
+      }
+      for (const row of statusRows ?? []) {
         totals[row.status] = (totals[row.status] ?? 0) + row.count;
-        if (!cityMatrix[row.componentType]) cityMatrix[row.componentType] = Object.create(null);
-        if (!cityMatrix[row.componentType][key]) cityMatrix[row.componentType][key] = 0;
-        cityMatrix[row.componentType][key] += row.count;
       }
       for (const row of reservationRows) {
         reservationsByStatus[row.status] = (reservationsByStatus[row.status] ?? 0) + row.count;
@@ -299,9 +364,12 @@ router.get(
         donationsLast30Days,
         transfusionsLast30Days,
         expiring7d: Object.values(expiringByCity).reduce((sum, row) => sum + (row?.expiring7d ?? 0), 0),
+        ...(systemCounts ? systemCounts.rows[0] : {}),
       },
       unavailableCities,
       partial: unavailableCities.length > 0,
+      degradedCities,
+      unknownStatusRowsByCity,
       scope: {
         role: req.user.role,
         cities,

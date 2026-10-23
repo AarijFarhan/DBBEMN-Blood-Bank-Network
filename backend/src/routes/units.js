@@ -78,18 +78,19 @@ router.get(
     const fetchLimit = query.limit + 1;
     const result = await Promise.all(
       cities.map(async (cityCode) => {
-        const { hot } = schemasFor(cityCode);
+        const { hot, hist } = schemasFor(cityCode);
         const units = await getPoolForCity(cityCode).query(
-          `SELECT unit_id AS "unitId", donation_id AS "donationId",
-                  blood_bank_id AS "bloodBankId", blood_group AS "bloodGroup",
-                  rh_factor AS "rhFactor", component_type AS "componentType",
-                  volume_ml AS "volumeMl", collected_on AS "collectedOn",
-                  expiry_date AS "expiryDate", status, version,
-                  updated_at AS "updatedAt"
-           FROM ${hot}.blood_units
-           WHERE ($1::uuid IS NULL OR blood_bank_id = $1)
-             AND ($2::common.unit_status_t IS NULL OR status = $2)
-           ORDER BY expiry_date, unit_id
+          `SELECT u.unit_id AS "unitId", u.donation_id AS "donationId",
+                  u.blood_bank_id AS "bloodBankId", u.blood_group AS "bloodGroup",
+                  u.rh_factor AS "rhFactor", u.component_type AS "componentType",
+                  u.volume_ml AS "volumeMl", u.collected_on AS "collectedOn",
+                  u.expiry_date AS "expiryDate", u.status, u.version,
+                  u.updated_at AS "updatedAt", d.notes AS "donationNotes"
+           FROM ${hot}.blood_units u
+           JOIN ${hist}.donations d ON d.donation_id = u.donation_id
+           WHERE ($1::uuid IS NULL OR u.blood_bank_id = $1)
+             AND ($2::common.unit_status_t IS NULL OR u.status = $2)
+           ORDER BY u.expiry_date, u.unit_id
            LIMIT $3 OFFSET $4`,
           [bankId, query.status ?? null, fetchLimit, offset],
         );

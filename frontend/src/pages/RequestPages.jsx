@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { useRequest } from "../hooks/useRequest";
 import { BLOOD_GROUPS, CITIES, DONOR_REQUEST_STATUSES, RH_FACTORS, URGENCIES } from "../constants";
-import { Button, EmptyState, ErrorState, Field, LoadingState, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
+import { Button, EmptyState, ErrorState, Field, Icon, LoadingState, Modal, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
 import { errorDetails, formatBloodType, formatDateTime, friendlyError, listFrom } from "../utils";
 import { hasErrors, maxLength, number, oneOf, required, uuid, validate, useFieldErrors } from "../validation";
 
@@ -33,13 +33,25 @@ function requesterLabel(request) {
   return "Unknown requester";
 }
 
+function useDebouncedValue(value, delay = 300) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedValue(value), delay);
+    return () => window.clearTimeout(timeout);
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
 /**
  * Hospital and blood bank view: search the donor directory for someone who can
  * give the requested blood type, send them a call-out, and track what happened.
  */
 export function SendDonorRequestsPage() {
   const { user } = useAuth();
-  const [filters, setFilters] = useState({ city: "", bloodGroup: "", rh: "", available: "true" });
+  const [filters, setFilters] = useState({ search: "", city: "", bloodGroup: "", rh: "", available: "true" });
+  const debouncedSearch = useDebouncedValue(filters.search);
   const [form, setForm] = useState({
     donorId: "",
     cityCode: "",
@@ -51,23 +63,37 @@ export function SendDonorRequestsPage() {
     notes: "",
   });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
+  const [calloutOpen, setCalloutOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("");
   const { errors, setErrors, clearError, clearAll } = useFieldErrors();
 
   const donors = useRequest(
-    () => api.search.donors({ ...filters, limit: 50 }),
-    [filters.city, filters.bloodGroup, filters.rh, filters.available],
+    () => api.search.donors({ ...filters, search: debouncedSearch.trim() || undefined, limit: 50 }),
+    [debouncedSearch, filters.city, filters.bloodGroup, filters.rh, filters.available],
+  );
+  const donorRows = listFrom(donors.data, ["donors"]);
+  const donorIdsKey = donorRows.map((donor) => donor.donorId).join(",");
+  const requestStatuses = useRequest(
+    () => donorRows.length
+      ? api.donorRequests.list({ donorIds: donorRows.map((donor) => donor.donorId), limit: 50 })
+      : Promise.resolve({ requests: [] }),
+    [donorIdsKey],
   );
   const requests = useRequest(
-    () => api.donorRequests.list({ ...(statusFilter ? { status: statusFilter } : {}), limit: 100 }),
+    () => api.donorRequests.list({ ...(statusFilter ? { status: statusFilter } : {}), limit: 50 }),
     [statusFilter],
   );
 
-  const donorRows = listFrom(donors.data, ["donors"]);
   const requestRows = listFrom(requests.data, ["requests"]);
+  const latestRequestByDonor = new Map();
+  for (const request of listFrom(requestStatuses.data, ["requests"])) {
+    const key = `${request.donorCityCode?.trim()}:${request.donorId}`;
+    if (!latestRequestByDonor.has(key)) latestRequestByDonor.set(key, request);
+  }
   const byStatus = requests.data?.byStatus || {};
   const pendingCount = byStatus.PENDING ?? 0;
   const acceptedCount = byStatus.ACCEPTED ?? 0;
+  const declinedCount = byStatus.DECLINED ?? 0;
 
   const compatibleCount = useMemo(
     () => donorRows.filter((donor) => donor.bloodGroup === form.requiredBloodGroup
@@ -93,7 +119,8 @@ export function SendDonorRequestsPage() {
       requiredRh: donor.rhFactor,
     }));
     clearAll();
-    setAction({ loading: false, error: null, success: `Selected ${donor.fullName} (${formatBloodType(donor.bloodGroup, donor.rhFactor)}). Fill the details and send.` });
+    setAction({ loading: false, error: null, success: null });
+    setCalloutOpen(true);
   }
 
   async function submit(event) {
@@ -114,8 +141,8 @@ export function SendDonorRequestsPage() {
         notes: form.notes || undefined,
       });
       setAction({ loading: false, error: null, success: `Call-out sent to ${created.donor.fullName}. They can accept or decline from their donor portal.` });
-      setForm({ donorId: "", cityCode: "", requiredBloodGroup: "", requiredRh: "POS", urgency: "ROUTINE", slotsRequested: 1, patientRef: "", notes: "" });
-      clearAll();
+      setCalloutOpen(false);
+      requestStatuses.reload();
       requests.reload();
     } catch (error) {
       setAction({ loading: false, error, success: null });
@@ -139,11 +166,17 @@ export function SendDonorRequestsPage() {
         eyebrow={user?.role === "HOSPITAL_ADMIN" ? "Hospital workspace" : "Blood bank workspace"}
         title="Donor call-outs"
         description="Search the donor directory, then ask a specific donor to give blood. The donor accepts or declines from their own portal."
-        actions={<Button variant="secondary" onClick={requests.reload} disabled={requests.loading}>Refresh requests</Button>}
+        actions={<Button variant="secondary" onClick={() => { requests.reload(); requestStatuses.reload(); }} disabled={requests.loading || requestStatuses.loading}>Refresh requests</Button>}
       />
 
       <SectionCard title="Step 1 · Find a donor" description="Donors are held in per-city shards. Narrow by group if you need a specific type.">
-        <div className="form-grid form-grid-four">
+        <div className="form-grid">
+          <Field label="Search donors">
+            <span className="search-input-wrap">
+              <Icon name="search" size={17} />
+              <input value={filters.search} onChange={(event) => updateFilter("search", event.target.value)} placeholder="Name, phone, or donor ID" />
+            </span>
+          </Field>
           <Field label="City shard">
             <select value={filters.city} onChange={(event) => updateFilter("city", event.target.value)}>
               <option value="">All cities</option>
@@ -174,36 +207,83 @@ export function SendDonorRequestsPage() {
       <SectionCard title="Matching donors" description="Click a row to select that donor for a call-out.">
         {donors.loading ? <LoadingState label="Searching donors" /> : null}
         {donors.error ? <ErrorState error={donors.error} onRetry={donors.reload} /> : null}
+        {requestStatuses.error ? <ErrorState error={requestStatuses.error} onRetry={requestStatuses.reload} /> : null}
         {!donors.loading && !donors.error ? donorRows.length ? (
           <div className="table-wrap">
             <table className="data-table">
-              <thead><tr><th>Donor</th><th>Blood type</th><th>City</th><th>Availability</th><th>Last donation</th><th>Phone</th><th className="table-actions-head">Action</th></tr></thead>
+              <thead><tr><th>Donor</th><th>Blood type</th><th>City</th><th>Availability</th><th>Last donation</th><th>Phone</th><th>Call-out</th><th className="table-actions-head">Action</th></tr></thead>
               <tbody>
-                {donorRows.map((donor) => (
-                  <tr key={donor.donorId} className={form.donorId === donor.donorId ? "row-selected" : ""}>
-                    <td><strong>{donor.fullName}</strong></td>
-                    <td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td>
-                    <td>{donor.cityCode}</td>
-                    <td><StatusBadge status={donor.isAvailable ? "AVAILABLE" : "UNAVAILABLE"} /></td>
-                    <td>{donor.lastDonationDate || "—"}</td>
-                    <td className="mono-text">{donor.phone || "—"}</td>
-                    <td><Button size="sm" variant={form.donorId === donor.donorId ? "primary" : "secondary"} onClick={() => pickDonor(donor)} disabled={!donor.isAvailable}>{form.donorId === donor.donorId ? "Selected" : "Select"}</Button></td>
-                  </tr>
-                ))}
+                {donorRows.map((donor) => {
+                  const request = latestRequestByDonor.get(`${donor.cityCode}:${donor.donorId}`);
+                  const pending = request?.status === "PENDING";
+                  const answeredStatus = request?.status === "ACCEPTED" || request?.status === "DECLINED";
+                  const label = pending
+                    ? "Request sent"
+                    : request?.status === "ACCEPTED"
+                      ? "Accepted"
+                      : request?.status === "DECLINED"
+                        ? "Rejected"
+                        : requestStatuses.loading
+                          ? "Checking…"
+                          : form.donorId === donor.donorId
+                            ? "Selected"
+                            : "Select";
+                  const message = pending
+                    ? "Request sent — waiting for donor"
+                    : request?.status === "ACCEPTED"
+                      ? "Donor accepted this call-out"
+                      : request?.status === "DECLINED"
+                        ? "Donor rejected this call-out"
+                        : null;
+                  return (
+                    <tr key={donor.donorId} className={form.donorId === donor.donorId ? "row-selected" : ""}>
+                      <td><strong>{donor.fullName}</strong></td>
+                      <td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td>
+                      <td>{donor.cityCode}</td>
+                      <td><StatusBadge status={donor.isAvailable ? "AVAILABLE" : "UNAVAILABLE"} /></td>
+                      <td>{donor.lastDonationDate || "—"}</td>
+                      <td className="mono-text">{donor.phone || "—"}</td>
+                      <td>{message || "—"}</td>
+                      <td>
+                        <Button
+                          size="sm"
+                          variant={form.donorId === donor.donorId ? "primary" : "secondary"}
+                          onClick={() => pickDonor(donor)}
+                          disabled={!donor.isAvailable || pending || answeredStatus || requestStatuses.loading || requestStatuses.error}
+                        >
+                          {label}
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         ) : <EmptyState title="No donors matched">Loosen the filters, or ask donors to sign up in your city.</EmptyState> : null}
       </SectionCard>
 
-      <SectionCard title="Step 2 · Send the call-out" description="The requested blood type must be one the selected donor can actually give.">
-        <form className="stack-form" noValidate onSubmit={submit}>
+      <Modal
+        open={calloutOpen}
+        title={`Send call-out to ${donorRows.find((donor) => donor.donorId === form.donorId)?.fullName || "selected donor"}`}
+        onClose={() => { if (!action.loading) setCalloutOpen(false); }}
+        className="modal-wide"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setCalloutOpen(false)} disabled={action.loading}>Cancel</Button>
+            <Button type="submit" form="donor-callout-form" disabled={action.loading || !form.donorId || requestStatuses.loading || requestStatuses.error || latestRequestByDonor.get(`${form.cityCode}:${form.donorId}`)?.status === "PENDING"}>
+              {action.loading ? "Sending…" : latestRequestByDonor.get(`${form.cityCode}:${form.donorId}`)?.status === "PENDING" ? "Request sent" : "Send call-out"}
+            </Button>
+          </>
+        }
+      >
+        <form id="donor-callout-form" className="stack-form" noValidate onSubmit={submit}>
           <div className="form-grid form-grid-two">
-            <Field label="Selected donor" hint={form.donorId ? undefined : "Pick a donor above"} error={errors.donorId}>
-              <input readOnly value={form.donorId} placeholder="No donor selected" className="mono-text" />
+            <Field label="Selected donor" error={errors.donorId}>
+              <input readOnly value={donorRows.find((donor) => donor.donorId === form.donorId)?.fullName || form.donorId} className="mono-text" />
             </Field>
             <Field label="Donor city shard" error={errors.cityCode}>
-              <input readOnly value={form.cityCode} placeholder="Set when you select a donor" className="mono-text" />
+              <input readOnly value={form.cityCode} className="mono-text" />
             </Field>
           </div>
           <div className="form-grid form-grid-four">
@@ -234,12 +314,12 @@ export function SendDonorRequestsPage() {
             <textarea rows={3} value={form.notes} onChange={(event) => update("notes", event.target.value)} placeholder="Explain where and when to come in." />
           </Field>
           {form.requiredBloodGroup ? <span className="field-hint">{compatibleCount} of the listed donors can donate to this exact type.</span> : null}
-          <Button type="submit" disabled={action.loading || !form.donorId}>{action.loading ? "Sending…" : "Send call-out"}</Button>
-          {!form.donorId ? <span className="field-hint">Select a donor from the table above to enable sending.</span> : null}
-          {action.success ? <Notice tone="success" title="Call-out sent">{action.success}</Notice> : null}
+          {latestRequestByDonor.get(`${form.cityCode}:${form.donorId}`)?.status === "PENDING" ? <span className="field-hint">Request sent. The donor must accept or reject it before another call-out can be sent.</span> : null}
           {action.error ? <Notice tone="error" title="Could not send call-out">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${JSON.stringify(errorDetails(action.error))}` : ""}</Notice> : null}
         </form>
-      </SectionCard>
+      </Modal>
+
+      {action.success ? <Notice tone="success" title="Call-out update">{action.success}</Notice> : null}
 
       <SectionCard title="Sent call-outs" description="Everything your facility has asked for, and how the donor responded.">
         <div className="form-grid form-grid-two">
@@ -256,6 +336,7 @@ export function SendDonorRequestsPage() {
             <div className="stat-grid">
               <div className="stat-card stat-card-amber"><span>Awaiting donor</span><strong>{pendingCount}</strong><small>No response yet</small></div>
               <div className="stat-card stat-card-green"><span>Accepted</span><strong>{acceptedCount}</strong><small>Donor said yes</small></div>
+              <div className="stat-card stat-card-red"><span>Rejected</span><strong>{declinedCount}</strong><small>Donor said no</small></div>
               <div className="stat-card stat-card-blue"><span>Total listed</span><strong>{requestRows.length}</strong><small>Matching the filter</small></div>
             </div>
             {requestRows.length ? (
@@ -272,7 +353,7 @@ export function SendDonorRequestsPage() {
                         <td><RequestStatusBadge status={request.status} /></td>
                         <td>{formatDateTime(request.requestedAt)}</td>
                         <td>{request.respondedAt ? formatDateTime(request.respondedAt) : "—"}</td>
-                        <td>{request.responseNotes || request.notes || "—"}</td>
+                        <td>{request.responseNotes || (request.status === "PENDING" ? "Request sent — waiting for donor." : request.status === "ACCEPTED" ? "Donor accepted this request." : request.status === "DECLINED" ? "Donor rejected this request." : request.notes) || "—"}</td>
                         <td>{request.status === "PENDING" ? <Button size="sm" variant="danger" onClick={() => cancel(request.requestId)} disabled={action.loading}>Cancel</Button> : <span className="cell-sub">—</span>}</td>
                       </tr>
                     ))}
@@ -294,7 +375,7 @@ export function SendDonorRequestsPage() {
 export function MyDonorRequestsPage() {
   const [notes, setNotes] = useState({});
   const [action, setAction] = useState({ loadingId: null, error: null, success: null });
-  const requests = useRequest(() => api.donorRequests.list({ limit: 100 }), []);
+  const requests = useRequest(() => api.donorRequests.list({ limit: 50 }), []);
 
   const requestRows = listFrom(requests.data, ["requests"]);
   const pending = requestRows.filter((item) => item.status === "PENDING");
@@ -321,6 +402,7 @@ export function MyDonorRequestsPage() {
           : "You declined this call-out.",
       });
       requests.reload();
+      window.dispatchEvent(new Event("donor-requests-updated"));
     } catch (error) {
       setAction({ loadingId: null, error, success: null });
     }
@@ -395,7 +477,7 @@ export function MyDonorRequestsPage() {
                     <td><RequestStatusBadge status={request.status} /></td>
                     <td>{formatDateTime(request.requestedAt)}</td>
                     <td>{request.respondedAt ? formatDateTime(request.respondedAt) : "—"}</td>
-                    <td>{request.responseNotes || "—"}</td>
+                    <td>{request.responseNotes || (request.status === "ACCEPTED" ? "You accepted this request." : request.status === "DECLINED" ? "You rejected this request." : "—")}</td>
                   </tr>
                 ))}
               </tbody>
