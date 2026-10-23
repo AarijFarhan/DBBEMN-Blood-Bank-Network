@@ -107,8 +107,8 @@ export default function AppShell() {
             <strong>{current?.label || "Workspace"}</strong>
             <span className="topbar-divider" />
             <span className="topbar-subtle">Secure workspace</span>
-            <span className="topbar-divider" />
-            <code>/api/v1</code>
+            {/* <span className="topbar-divider" /> */}
+            {/* <code>/api/v1</code> */}
           </div>
           <div className="topbar-role">{ROLE_LABELS[user?.role] || "Workspace"}</div>
         </header>

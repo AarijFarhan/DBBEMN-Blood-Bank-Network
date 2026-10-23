@@ -31,15 +31,37 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   contentSecurityPolicy: false,
 }));
+
+function isLocalDevelopmentOrigin(origin) {
+  try {
+    const { hostname, protocol } = new URL(origin);
+    return protocol === "http:" && (hostname === "localhost" || hostname === "127.0.0.1");
+  } catch {
+    return false;
+  }
+}
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || isLocalDevelopmentOrigin(origin) || env.corsOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new AppError(403, "CORS_ORIGIN_DENIED", "This origin is not allowed."));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Request-Id", "x-request-id"],
+  exposedHeaders: ["X-Instance-Id", "X-Request-Id"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
+
 app.use((req, res, next) => {
   res.setHeader("X-Instance-Id", env.instanceId);
   req.log = logger.child({ requestId: req.get("x-request-id") || undefined });
-  const origin = req.get("origin");
-  if (!origin || env.corsOrigins.includes(origin) || origin === `${req.protocol}://${req.get("host")}`) {
-    cors({ origin: origin || false })(req, res, next);
-    return;
-  }
-  next(new AppError(403, "CORS_ORIGIN_DENIED", "This origin is not allowed."));
+  next();
 });
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false, limit: "1mb" }));

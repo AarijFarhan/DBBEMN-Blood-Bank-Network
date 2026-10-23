@@ -210,6 +210,29 @@ export function PageHeader({ eyebrow, title, description, actions, icon, childre
   );
 }
 
+export function PaginationControls({ page, pageSize, totalItems, onPageChange }) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const start = totalItems === 0 ? 0 : (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, totalItems);
+
+  return (
+    <nav className="pagination-controls" aria-label="Pagination">
+      <span className="pagination-summary">
+        Showing {start}–{end} of {totalItems}
+      </span>
+      <div className="pagination-actions">
+        <Button variant="secondary" size="sm" onClick={() => onPageChange(page - 1)} disabled={page <= 1}>
+          Previous
+        </Button>
+        <span className="pagination-page">Page {page} of {totalPages}</span>
+        <Button variant="secondary" size="sm" onClick={() => onPageChange(page + 1)} disabled={page >= totalPages}>
+          Next
+        </Button>
+      </div>
+    </nav>
+  );
+}
+
 export function SectionCard({ title, description, action, children, className = "", icon }) {
   return (
     <section className={`section-card ${className}`.trim()}>

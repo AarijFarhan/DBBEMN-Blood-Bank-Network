@@ -30,7 +30,8 @@ const listQuerySchema = z.object({
   hospitalId: uuidSchema.optional(),
   city: cityCodeSchema.optional(),
   status: z.enum(["ACTIVE", "DISPATCHED", "COMPLETED", "CANCELLED", "EXPIRED"]).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(50).default(25),
+  page: z.coerce.number().int().min(1).default(1),
 });
 const dispatchSchema = z.object({ note: z.string().trim().max(500).optional() });
 const transfuseSchema = z.object({
@@ -448,6 +449,8 @@ router.get(
       bankId = req.user.blood_bank_id;
     }
 
+    const offset = (query.page - 1) * query.limit;
+    const fetchLimit = query.limit + 1;
     const rows = await Promise.all(cities.map(async (cityCode) => {
       const { hot } = schemasFor(cityCode);
       const result = await getPoolForCity(cityCode).query(
@@ -465,12 +468,15 @@ router.get(
            AND ($2::uuid IS NULL OR u.blood_bank_id = $2)
            AND ($3::common.reservation_status_t IS NULL OR r.status = $3)
          ORDER BY r.reserved_at DESC, r.reservation_id
-         LIMIT $4`,
-        [hospitalId, bankId, query.status ?? null, query.limit],
+         LIMIT $4 OFFSET $5`,
+        [hospitalId, bankId, query.status ?? null, fetchLimit, offset],
       );
       return result.rows.map((row) => ({ ...row, cityCode }));
     }));
-    res.json({ reservations: rows.flat() });
+    const allRows = rows.flat();
+    const hasMore = allRows.length > query.limit;
+    const reservations = hasMore ? allRows.slice(0, query.limit) : allRows;
+    res.json({ reservations, page: query.page, limit: query.limit, hasMore });
   }),
 );
 

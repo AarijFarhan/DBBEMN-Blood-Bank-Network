@@ -296,8 +296,7 @@ export async function rebuildFilter(kind, cityCode, idsOrLoader) {
  * Trust requires both the marker *and* a caught-up mutation count: the marker
  * says "built from the table", and the counters say "still in sync with it".
  */
-async function isTrusted(kind, cityCode) {
-  const marker = await cacheGet(trustedKey(kind, cityCode));
+export async function isTrusted(kind, cityCode) {  const marker = await cacheGet(trustedKey(kind, cityCode));
   if (marker !== "1") return false;
   const { absorbed, writes, pending } = await readCounters(kind, cityCode);
   if (absorbed !== writes || pending !== 0) {

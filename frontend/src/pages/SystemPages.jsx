@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useRequest } from "../hooks/useRequest";
+import { usePagination } from "../hooks/usePagination";
 import { api } from "../api";
 import { BLOOD_GROUPS, CITIES, RH_FACTORS } from "../constants";
-import { AvailabilityBadge, Button, Checkbox, ConfirmDeleteModal, EmptyState, ErrorState, Field, LoadingState, Notice, PageHeader, PartialResults, RoleBadge, SectionCard, SimulatedBadge, StatusBadge } from "../components/UI";
+import { AvailabilityBadge, Button, Checkbox, ConfirmDeleteModal, EmptyState, ErrorState, Field, LoadingState, Modal, Notice, PageHeader, PaginationControls, PartialResults, RoleBadge, SectionCard, SimulatedBadge, StatusBadge } from "../components/UI";
 import { ageFromDate, errorDetails, formatBloodType, formatDate, formatDateTime, formatNumber, friendlyError, listFrom } from "../utils";
 import { email as emailRule, hasErrors, maxLength, minLength, number, oneOf, password as passwordRule, phone as phoneRule, required, username as usernameRule, validate, useFieldErrors } from "../validation";
 
@@ -99,6 +100,7 @@ export function DonorDirectoryPage() {
   const [bloodGroup, setBloodGroup] = useState("");
   const [rh, setRh] = useState("");
   const [availableOnly, setAvailableOnly] = useState(false);
+  const { page, limit: pageSize, setPage, resetPage } = usePagination({ defaultLimit: 50 });
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
@@ -116,6 +118,7 @@ export function DonorDirectoryPage() {
   );
 
   const donors = listFrom(request.data, ["donors"]);
+  const pageDonors = donors.slice((page - 1) * pageSize, page * pageSize);
   const totalMatched = request.data?.total ?? donors.length;
   const availableCount = donors.filter((donor) => donor.isAvailable).length;
   const cityCount = new Set(donors.map((donor) => donor.cityCode)).size;
@@ -129,6 +132,7 @@ export function DonorDirectoryPage() {
       await api.system.deleteDonor(pendingDelete.id, pendingDelete.city);
       setPendingDelete(null);
       request.reload();
+      if (pageDonors.length === 1 && page > 1) setPage(page - 1);
     } catch (error) {
       setDeleteError(friendlyError(error));
     } finally {
@@ -147,26 +151,26 @@ export function DonorDirectoryPage() {
       <SectionCard title="Filters" description="Leave a field empty to search every city shard. Results are capped at 100 donors per city.">
         <div className="form-grid form-grid-four">
           <Field label="City shard">
-            <select value={city} onChange={(event) => setCity(event.target.value)}>
+            <select value={city} onChange={(event) => { setCity(event.target.value); resetPage(); }}>
               <option value="">All cities</option>
               {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
             </select>
           </Field>
           <Field label="Blood group">
-            <select value={bloodGroup} onChange={(event) => setBloodGroup(event.target.value)}>
+            <select value={bloodGroup} onChange={(event) => { setBloodGroup(event.target.value); resetPage(); }}>
               <option value="">Any group</option>
               {BLOOD_GROUPS.map((group) => <option key={group} value={group}>{group}</option>)}
             </select>
           </Field>
           <Field label="Rh factor">
-            <select value={rh} onChange={(event) => setRh(event.target.value)}>
+            <select value={rh} onChange={(event) => { setRh(event.target.value); resetPage(); }}>
               <option value="">Any factor</option>
               {RH_FACTORS.map((factor) => <option key={factor} value={factor}>{factor === "POS" ? "Positive" : "Negative"}</option>)}
             </select>
           </Field>
           <div className="field">
             <span className="field-label">Availability</span>
-            <Checkbox label="Only donors currently available" checked={availableOnly} onChange={(event) => setAvailableOnly(event.target.checked)} />
+            <Checkbox label="Only donors currently available" checked={availableOnly} onChange={(event) => { setAvailableOnly(event.target.checked); resetPage(); }} />
           </div>
         </div>
       </SectionCard>
@@ -181,7 +185,10 @@ export function DonorDirectoryPage() {
           <div className="stat-card stat-card-amber"><span>Available in view</span><strong>{formatNumber(availableCount)}</strong><small>Of the listed rows</small></div>
         </div>
         <SectionCard title="Donor profiles" description="Donor records live in each city's history schema, so a profile is only visible from the shard that owns it.">
-          {donors.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Donor</th><th>Blood type</th><th>City</th><th>Availability</th><th>Last donation</th><th>Age</th><th>Weight</th><th>Phone</th><th>Donor ID</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{donors.map((donor) => <tr key={donor.donorId}><td><strong>{donor.fullName}</strong></td><td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td><td>{donor.cityCode}</td><td><AvailabilityBadge available={Boolean(donor.isAvailable)} /></td><td>{formatDate(donor.lastDonationDate)}</td><td>{ageFromDate(donor.dateOfBirth) ?? "—"}</td><td>{formatNumber(donor.weightKg)} kg</td><td className="mono-text">{donor.phone || "—"}</td><td className="mono-text">{donor.donorId?.slice(0, 8)}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ id: donor.donorId, city: donor.cityCode, name: donor.fullName }); }}>Delete</Button></td></tr>)}</tbody></table></div> : <EmptyState title="No donors matched">Adjust the filters, or register a donor profile from the donor sign-up page.</EmptyState>}
+          {pageDonors.length ? <>
+            <div className="table-wrap"><table className="data-table"><thead><tr><th>Donor</th><th>Blood type</th><th>City</th><th>Availability</th><th>Last donation</th><th>Age</th><th>Weight</th><th>Phone</th><th>Donor ID</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{pageDonors.map((donor) => <tr key={donor.donorId}><td><strong>{donor.fullName}</strong></td><td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td><td>{donor.cityCode}</td><td><AvailabilityBadge available={Boolean(donor.isAvailable)} /></td><td>{formatDate(donor.lastDonationDate)}</td><td>{ageFromDate(donor.dateOfBirth) ?? "—"}</td><td>{formatNumber(donor.weightKg)} kg</td><td className="mono-text">{donor.phone || "—"}</td><td className="mono-text">{donor.donorId?.slice(0, 8)}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ id: donor.donorId, city: donor.cityCode, name: donor.fullName }); }}>Delete</Button></td></tr>)}</tbody></table></div>
+            <PaginationControls page={page} pageSize={pageSize} totalItems={donors.length} onPageChange={setPage} />
+          </> : <EmptyState title="No donors matched">Adjust the filters, or register a donor profile from the donor sign-up page.</EmptyState>}
         </SectionCard>
       </> : null}
       <ConfirmDeleteModal
@@ -199,23 +206,41 @@ export function DonorDirectoryPage() {
 }
 
 export function HospitalsBanksPage() {
-  const [city, setCity] = useState("");
+  const [cityFilter, setCityFilter] = useState("");
   const [entity, setEntity] = useState("hospital");
-  const [form, setForm] = useState({ name: "", address: "", phone: "", latitude: "", longitude: "" });
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [form, setForm] = useState({ cityCode: "", name: "", address: "", phone: "", latitude: "", longitude: "" });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const { errors, setErrors, clearError } = useFieldErrors();
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
-  const hospitals = useRequest(() => api.catalog.hospitals(city ? { city } : undefined), [city]);
-  const banks = useRequest(() => api.catalog.bloodBanks(city ? { city } : undefined), [city]);
+  const hospitalPagination = usePagination({ defaultLimit: 20 });
+  const bankPagination = usePagination({ defaultLimit: 20 });
+  const hospitals = useRequest(() => api.catalog.hospitals(cityFilter ? { city: cityFilter } : undefined), [cityFilter]);
+  const banks = useRequest(() => api.catalog.bloodBanks(cityFilter ? { city: cityFilter } : undefined), [cityFilter]);
   const hospitalRows = listFrom(hospitals.data, ["hospitals"]);
   const bankRows = listFrom(banks.data, ["bloodBanks"]);
+  const pageSize = hospitalPagination.limit;
+  const visibleHospitals = hospitalRows.slice((hospitalPagination.page - 1) * pageSize, hospitalPagination.page * pageSize);
+  const visibleBanks = bankRows.slice((bankPagination.page - 1) * pageSize, bankPagination.page * pageSize);
 
   const DELETE_CONSEQUENCES = {
     hospital: "Any hospital admin account attached to it, plus its reservations, transfusion records and cached search requests in the city shard.",
     bloodBank: "Any blood bank admin account attached to it, plus every donation, blood unit, reservation, status log and read-model entry for that bank in the city shard.",
   };
+
+  function openCreateModal(nextEntity) {
+    setEntity(nextEntity);
+    setForm({ cityCode: cityFilter, name: "", address: "", phone: "", latitude: "", longitude: "" });
+    setErrors({});
+    setAction({ loading: false, error: null, success: null });
+    setShowCreateModal(true);
+  }
+
+  function closeCreateModal() {
+    if (!action.loading) setShowCreateModal(false);
+  }
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -225,9 +250,11 @@ export function HospitalsBanksPage() {
       if (pendingDelete.kind === "hospital") {
         await api.system.deleteHospital(pendingDelete.id);
         hospitals.reload();
+        if (visibleHospitals.length === 1 && hospitalPagination.page > 1) hospitalPagination.prevPage();
       } else {
         await api.system.deleteBloodBank(pendingDelete.id);
         banks.reload();
+        if (visibleBanks.length === 1 && bankPagination.page > 1) bankPagination.prevPage();
       }
       setPendingDelete(null);
     } catch (error) {
@@ -244,13 +271,13 @@ export function HospitalsBanksPage() {
 
   async function submit(event) {
     event.preventDefault();
-    const nextErrors = validate({ ...form, cityCode: city }, FACILITY_RULES);
+    const nextErrors = validate(form, FACILITY_RULES);
     setErrors(nextErrors);
     if (hasErrors(nextErrors)) return;
     setAction({ loading: true, error: null, success: null });
     const body = {
       name: form.name,
-      cityCode: city,
+      cityCode: form.cityCode,
       address: form.address || undefined,
       phone: form.phone || undefined,
       latitude: form.latitude ? Number(form.latitude) : undefined,
@@ -259,14 +286,15 @@ export function HospitalsBanksPage() {
     try {
       if (entity === "hospital") {
         await api.system.createHospital(body);
-        setAction({ loading: false, error: null, success: `Hospital "${form.name}" created in ${city}.` });
+        setAction({ loading: false, error: null, success: `Hospital "${form.name}" created in ${form.cityCode}.` });
         hospitals.reload();
       } else {
         await api.system.createBloodBank(body);
-        setAction({ loading: false, error: null, success: `Blood bank "${form.name}" created in ${city}.` });
+        setAction({ loading: false, error: null, success: `Blood bank "${form.name}" created in ${form.cityCode}.` });
         banks.reload();
       }
-      setForm({ name: "", address: "", phone: "", latitude: "", longitude: "" });
+      setForm({ cityCode: "", name: "", address: "", phone: "", latitude: "", longitude: "" });
+      setShowCreateModal(false);
     } catch (error) {
       setAction({ loading: false, error, success: null });
     }
@@ -278,56 +306,60 @@ export function HospitalsBanksPage() {
         eyebrow="System workspace"
         title="Hospitals &amp; blood banks"
         description="Register the facilities that hospital and blood-bank admin accounts are attached to. A facility must exist before its admin account can be created."
+        actions={<><Button variant="secondary" onClick={() => openCreateModal("hospital")}>Add hospital</Button><Button onClick={() => openCreateModal("bloodBank")}>Add blood bank</Button></>}
       />
-      <div className="workspace-grid workspace-grid-wide">
-        <SectionCard title="Register a facility" description="City is required. Address and coordinates are optional but improve distance sorting.">
-          <form className="stack-form" noValidate onSubmit={submit}>
-            <div className="form-grid form-grid-two">
-              <Field label="Facility type">
-                <select value={entity} onChange={(event) => setEntity(event.target.value)}>
-                  <option value="hospital">Hospital</option>
-                  <option value="bloodBank">Blood bank</option>
-                </select>
-              </Field>
-              <Field label="City shard" hint="Required" error={errors.cityCode}>
-                <select value={city} onChange={(event) => { setCity(event.target.value); clearError("cityCode"); }}>
-                  <option value="">Select a city</option>
-                  {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
-                </select>
-              </Field>
-            </div>
-            <Field label="Name" hint="Required" error={errors.name}><input value={form.name} onChange={(event) => update("name", event.target.value)} placeholder="e.g. Lahore General Hospital" /></Field>
-            <Field label="Address" error={errors.address}><input value={form.address} onChange={(event) => update("address", event.target.value)} placeholder="Street address" /></Field>
-            <Field label="Phone" error={errors.phone}><input value={form.phone} onChange={(event) => update("phone", event.target.value)} placeholder="+92-000-0000000" /></Field>
-            <div className="form-grid form-grid-two">
-              <Field label="Latitude" error={errors.latitude}><input type="number" step="any" value={form.latitude} onChange={(event) => update("latitude", event.target.value)} placeholder="31.520400" /></Field>
-              <Field label="Longitude" error={errors.longitude}><input type="number" step="any" value={form.longitude} onChange={(event) => update("longitude", event.target.value)} placeholder="74.358700" /></Field>
-            </div>
-            <Button type="submit" disabled={action.loading || !city}>{action.loading ? "Creating…" : `Create ${entity === "hospital" ? "hospital" : "blood bank"}`}</Button>
-            {!city ? <span className="field-hint">Select a city shard to enable creation.</span> : null}
-            {action.success ? <Notice tone="success" title="Facility created">{action.success}</Notice> : null}
-            {action.error ? <Notice tone="error" title="Could not create facility">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
-          </form>
-        </SectionCard>
-        <SectionCard title="City filter" description="Both lists read the shared catalog and are visible to every authenticated user.">
+      {action.success ? <Notice tone="success" title="Facility created">{action.success}</Notice> : null}
+      <SectionCard title="City filter" description="Both lists read the shared catalog and are visible to every authenticated user.">
           <Field label="City shard">
-            <select value={city} onChange={(event) => setCity(event.target.value)}>
+            <select value={cityFilter} onChange={(event) => {
+              setCityFilter(event.target.value);
+              hospitalPagination.resetPage();
+              bankPagination.resetPage();
+            }}>
               <option value="">All cities</option>
               {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
             </select>
           </Field>
-        </SectionCard>
-      </div>
+      </SectionCard>
       <SectionCard title="Hospitals" description="Active hospital records in the catalog.">
         {hospitals.loading ? <LoadingState label="Loading hospitals" /> : null}
         {hospitals.error ? <ErrorState error={hospitals.error} onRetry={hospitals.reload} /> : null}
-        {!hospitals.loading && !hospitals.error ? hospitalRows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Name</th><th>City</th><th>Address</th><th>Phone</th><th>Coordinates</th><th>Hospital ID</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{hospitalRows.map((row) => <tr key={row.hospitalId}><td><strong>{row.name}</strong></td><td>{row.cityCode}</td><td>{row.address || "—"}</td><td>{row.phone || "—"}</td><td>{row.latitude ? `${row.latitude}, ${row.longitude}` : "—"}</td><td className="mono-text">{row.hospitalId?.slice(0, 8)}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ kind: "hospital", id: row.hospitalId, name: row.name }); }}>Delete</Button></td></tr>)}</tbody></table></div> : <EmptyState title="No hospitals registered">Create one with the form above, then attach an admin account from the Users page.</EmptyState> : null}
+        {!hospitals.loading && !hospitals.error ? hospitalRows.length ? <>
+          <div className="table-wrap"><table className="data-table"><thead><tr><th>Name</th><th>City</th><th>Address</th><th>Phone</th><th>Coordinates</th><th>Hospital ID</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{visibleHospitals.map((row) => <tr key={row.hospitalId}><td><strong>{row.name}</strong></td><td>{row.cityCode}</td><td>{row.address || "—"}</td><td>{row.phone || "—"}</td><td>{row.latitude ? `${row.latitude}, ${row.longitude}` : "—"}</td><td className="mono-text">{row.hospitalId?.slice(0, 8)}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ kind: "hospital", id: row.hospitalId, name: row.name }); }}>Delete</Button></td></tr>)}</tbody></table></div>
+          <PaginationControls page={hospitalPagination.page} pageSize={pageSize} totalItems={hospitalRows.length} onPageChange={hospitalPagination.setPage} />
+        </> : <EmptyState title="No hospitals registered">Add a hospital with the button above, then attach an admin account from the Users page.</EmptyState> : null}
       </SectionCard>
       <SectionCard title="Blood banks" description="Active blood bank records in the catalog.">
         {banks.loading ? <LoadingState label="Loading blood banks" /> : null}
         {banks.error ? <ErrorState error={banks.error} onRetry={banks.reload} /> : null}
-        {!banks.loading && !banks.error ? bankRows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Name</th><th>City</th><th>Address</th><th>Phone</th><th>Coordinates</th><th>Bank ID</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{bankRows.map((row) => <tr key={row.bloodBankId}><td><strong>{row.name}</strong></td><td>{row.cityCode}</td><td>{row.address || "—"}</td><td>{row.phone || "—"}</td><td>{row.latitude ? `${row.latitude}, ${row.longitude}` : "—"}</td><td className="mono-text">{row.bloodBankId?.slice(0, 8)}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ kind: "bloodBank", id: row.bloodBankId, name: row.name }); }}>Delete</Button></td></tr>)}</tbody></table></div> : <EmptyState title="No blood banks registered">Create one with the form above, then attach an admin account from the Users page.</EmptyState> : null}
+        {!banks.loading && !banks.error ? bankRows.length ? <>
+          <div className="table-wrap"><table className="data-table"><thead><tr><th>Name</th><th>City</th><th>Address</th><th>Phone</th><th>Coordinates</th><th>Bank ID</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{visibleBanks.map((row) => <tr key={row.bloodBankId}><td><strong>{row.name}</strong></td><td>{row.cityCode}</td><td>{row.address || "—"}</td><td>{row.phone || "—"}</td><td>{row.latitude ? `${row.latitude}, ${row.longitude}` : "—"}</td><td className="mono-text">{row.bloodBankId?.slice(0, 8)}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ kind: "bloodBank", id: row.bloodBankId, name: row.name }); }}>Delete</Button></td></tr>)}</tbody></table></div>
+          <PaginationControls page={bankPagination.page} pageSize={pageSize} totalItems={bankRows.length} onPageChange={bankPagination.setPage} />
+        </> : <EmptyState title="No blood banks registered">Add a blood bank with the button above, then attach an admin account from the Users page.</EmptyState> : null}
       </SectionCard>
+      <Modal open={showCreateModal} title={`Add ${entity === "hospital" ? "hospital" : "blood bank"}`} onClose={closeCreateModal}>
+        <form className="stack-form" noValidate onSubmit={submit}>
+          <Field label="City shard" hint="Required" error={errors.cityCode}>
+            <select value={form.cityCode} onChange={(event) => update("cityCode", event.target.value)}>
+              <option value="">Select a city</option>
+              {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Name" hint="Required" error={errors.name}><input value={form.name} onChange={(event) => update("name", event.target.value)} placeholder={entity === "hospital" ? "e.g. Lahore General Hospital" : "e.g. Central Blood Bank"} /></Field>
+          <Field label="Address" error={errors.address}><input value={form.address} onChange={(event) => update("address", event.target.value)} placeholder="Street address" /></Field>
+          <Field label="Phone" error={errors.phone}><input value={form.phone} onChange={(event) => update("phone", event.target.value)} placeholder="+92-000-0000000" /></Field>
+          <div className="form-grid form-grid-two">
+            <Field label="Latitude" error={errors.latitude}><input type="number" step="any" value={form.latitude} onChange={(event) => update("latitude", event.target.value)} placeholder="31.520400" /></Field>
+            <Field label="Longitude" error={errors.longitude}><input type="number" step="any" value={form.longitude} onChange={(event) => update("longitude", event.target.value)} placeholder="74.358700" /></Field>
+          </div>
+          {action.error ? <Notice tone="error" title="Could not create facility">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
+          <div className="facility-form-actions">
+            <Button variant="secondary" onClick={closeCreateModal} disabled={action.loading}>Cancel</Button>
+            <Button type="submit" disabled={action.loading || !form.cityCode}>{action.loading ? "Creating…" : `Create ${entity === "hospital" ? "hospital" : "blood bank"}`}</Button>
+          </div>
+          {!form.cityCode ? <span className="field-hint">Select a city shard to enable creation.</span> : null}
+        </form>
+      </Modal>
       <ConfirmDeleteModal
         open={Boolean(pendingDelete)}
         title={pendingDelete?.kind === "bloodBank" ? "Delete blood bank" : "Delete hospital"}
@@ -352,13 +384,21 @@ const USER_ROLE_OPTIONS = [
 export function UsersPage() {
   const [form, setForm] = useState({ username: "", email: "", password: "", role: "HOSPITAL_ADMIN", facilityId: "", donorCity: "" });
   const [action, setAction] = useState({ loading: false, error: null, success: null });
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const { errors, setErrors, clearError } = useFieldErrors();
   const users = useRequest(() => api.system.listUsers(), []);
   const hospitals = useRequest(() => api.catalog.hospitals(), []);
   const banks = useRequest(() => api.catalog.bloodBanks(), []);
+  const donors = useRequest(
+    () => form.role === "DONOR" && form.donorCity
+      ? api.search.donors({ city: form.donorCity, limit: 100 })
+      : Promise.resolve({ donors: [] }),
+    [form.role, form.donorCity],
+  );
   const userRows = listFrom(users.data, ["users"]);
   const hospitalRows = listFrom(hospitals.data, ["hospitals"]);
   const bankRows = listFrom(banks.data, ["bloodBanks"]);
+  const donorRows = listFrom(donors.data, ["donors"]);
   const selected = USER_ROLE_OPTIONS.find((option) => option.value === form.role);
 
   function update(name, value) {
@@ -366,12 +406,21 @@ export function UsersPage() {
     clearError(name);
   }
 
+  function openCreateModal() {
+    setAction({ loading: false, error: null, success: null });
+    setShowCreateModal(true);
+  }
+
+  function closeCreateModal() {
+    if (!action.loading) setShowCreateModal(false);
+  }
+
   async function submit(event) {
     event.preventDefault();
     const nextErrors = validate(form, USER_RULES);
     if (form.role === "HOSPITAL_ADMIN" && !form.facilityId) nextErrors.facilityId = "Hospital is required.";
     if (form.role === "BLOODBANK_ADMIN" && !form.facilityId) nextErrors.facilityId = "Blood bank is required.";
-    if (form.role === "DONOR" && !form.facilityId) nextErrors.facilityId = "Donor ID is required.";
+    if (form.role === "DONOR" && !form.facilityId) nextErrors.facilityId = "Select a donor profile.";
     if (form.role === "DONOR" && !form.donorCity) nextErrors.donorCity = "Donor city shard is required.";
     setErrors(nextErrors);
     if (hasErrors(nextErrors)) return;
@@ -387,6 +436,7 @@ export function UsersPage() {
       const created = await api.system.createUser(body);
       setAction({ loading: false, error: null, success: `Account "${created.user?.username || form.username}" created. It can sign in at /login immediately.` });
       setForm({ username: "", email: "", password: "", role: "HOSPITAL_ADMIN", facilityId: "", donorCity: "" });
+      setShowCreateModal(false);
       users.reload();
     } catch (error) {
       setAction({ loading: false, error, success: null });
@@ -403,10 +453,17 @@ export function UsersPage() {
         eyebrow="System workspace"
         title="Users"
         description="Every portal identity in the system. Hospital and blood-bank accounts are tenant scoped to the facility they are attached to."
-        actions={<Button variant="secondary" onClick={users.reload} disabled={users.loading}>Refresh list</Button>}
+        actions={<><Button variant="secondary" onClick={users.reload} disabled={users.loading}>Refresh list</Button><Button onClick={openCreateModal}>Add user</Button></>}
       />
-      <SectionCard title="Create an account" description="The account can sign in straight after creation. Donor accounts need a donor profile that already exists in the chosen city shard.">
+      {action.success ? <Notice tone="success" title="Account created">{action.success}</Notice> : null}
+      <SectionCard title="Account directory" description="All portal identities across every city shard.">
+        {users.loading ? <LoadingState label="Loading accounts" /> : null}
+        {users.error ? <ErrorState error={users.error} onRetry={users.reload} /> : null}
+        {!users.loading && !users.error ? userRows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Scope</th><th>Status</th><th>Created</th></tr></thead><tbody>{userRows.map((row) => <tr key={row.userId}><td><strong>{row.username}</strong></td><td><RoleBadge role={row.role} /></td><td>{row.email}</td><td className="mono-text">{row.hospitalId ? `Hospital ${row.hospitalId.slice(0, 8)}` : row.bloodBankId ? `Bank ${row.bloodBankId.slice(0, 8)}` : row.donorId ? `Donor ${row.donorCityCode} / ${row.donorId.slice(0, 8)}` : "All cities"}</td><td><StatusBadge status={row.isActive === false ? "INACTIVE" : "ACTIVE"} /></td><td>{formatDateTime(row.createdAt)}</td></tr>)}</tbody></table></div> : <EmptyState title="No accounts yet">Create the first account with the Add user button.</EmptyState> : null}
+      </SectionCard>
+      <Modal open={showCreateModal} title="Add user" onClose={closeCreateModal}>
         <form className="stack-form" noValidate onSubmit={submit}>
+          <p className="modal-copy">The account can sign in as soon as it is created. Donor accounts must be linked to an existing donor profile.</p>
           <div className="form-grid form-grid-two">
             <Field label="Role">
               <select value={form.role} onChange={(event) => { update("role", event.target.value); update("facilityId", ""); update("donorCity", ""); }}>
@@ -425,8 +482,11 @@ export function UsersPage() {
                   {CITIES.map((item) => <option key={item.cityCode} value={item.cityCode}>{item.cityCode} · {item.name}</option>)}
                 </select>
               </Field>
-              <Field label="Donor ID" hint="UUID of an existing donor profile" error={errors.facilityId}>
-                <input value={form.facilityId} onChange={(event) => update("facilityId", event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" />
+              <Field label="Donor profile" hint="Choose an existing profile" error={errors.facilityId}>
+                <select value={form.facilityId} onChange={(event) => update("facilityId", event.target.value)} disabled={!form.donorCity || donors.loading}>
+                  <option value="">{!form.donorCity ? "Select a city first" : donors.loading ? "Loading donors…" : donorRows.length ? "Select a donor" : "No donors found in this city"}</option>
+                  {donorRows.map((donor) => <option key={donor.donorId} value={donor.donorId}>{donor.fullName} · {formatBloodType(donor.bloodGroup, donor.rhFactor)}</option>)}
+                </select>
               </Field>
             </div>
           ) : selected?.needs ? (
@@ -438,16 +498,13 @@ export function UsersPage() {
             </Field>
           ) : null}
           {selected?.needs && !facilityOptions.length && form.role !== "DONOR" ? <span className="field-hint">Register a facility on the Hospitals &amp; banks page first.</span> : null}
-          <Button type="submit" disabled={action.loading}>{action.loading ? "Creating…" : "Create account"}</Button>
-          {action.success ? <Notice tone="success" title="Account created">{action.success}</Notice> : null}
           {action.error ? <Notice tone="error" title="Could not create account">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
+          <div className="facility-form-actions">
+            <Button variant="secondary" onClick={closeCreateModal} disabled={action.loading}>Cancel</Button>
+            <Button type="submit" disabled={action.loading}>{action.loading ? "Creating…" : "Create account"}</Button>
+          </div>
         </form>
-      </SectionCard>
-      <SectionCard title="Account directory" description="All portal identities across every city shard.">
-        {users.loading ? <LoadingState label="Loading accounts" /> : null}
-        {users.error ? <ErrorState error={users.error} onRetry={users.reload} /> : null}
-        {!users.loading && !users.error ? userRows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Username</th><th>Role</th><th>Email</th><th>Scope</th><th>Status</th><th>Created</th></tr></thead><tbody>{userRows.map((row) => <tr key={row.userId}><td><strong>{row.username}</strong></td><td><RoleBadge role={row.role} /></td><td>{row.email}</td><td className="mono-text">{row.hospitalId ? `Hospital ${row.hospitalId.slice(0, 8)}` : row.bloodBankId ? `Bank ${row.bloodBankId.slice(0, 8)}` : row.donorId ? `Donor ${row.donorCityCode} / ${row.donorId.slice(0, 8)}` : "All cities"}</td><td><StatusBadge status={row.isActive === false ? "INACTIVE" : "ACTIVE"} /></td><td>{formatDateTime(row.createdAt)}</td></tr>)}</tbody></table></div> : <EmptyState title="No accounts yet">Create the first account with the form above.</EmptyState> : null}
-      </SectionCard>
+      </Modal>
     </div>
   );
 }

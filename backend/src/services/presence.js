@@ -25,6 +25,7 @@ import {
   rebuildFilter,
   noteWrite,
   resolveWrite,
+  isTrusted,
 } from "../cache/bloom.js";
 import { logger } from "../lib/logger.js";
 
@@ -128,11 +129,33 @@ export async function rebuildPresenceFilter(kind, cityCode, selectIds) {
 }
 
 /**
+ * Whether every configured filter is already built and in sync.
+ *
+ * Boot used to rebuild all filters unconditionally, which means a dev server
+ * that restarts on every file save re-read 17M ids (units + donations per city)
+ * and saturated the shards for minutes. The filters are persisted in Redis and
+ * carry trust counters, so a rebuild is only needed when one is missing/stale.
+ */
+export async function allPresenceFiltersTrusted(loaders, cities = CITY_CODES) {
+  for (const cityCode of cities) {
+    for (const kind of Object.values(KIND)) {
+      if (!loaders[kind]) continue;
+      try {
+        if (!(await isTrusted(kind, cityCode))) return false;
+      } catch {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * Rebuild every kind for every city. Intended for boot, deploy, and ops.
  *
  * Failures are isolated per filter. A loader that references a table that does
- * not exist must not prevent the remaining filters from being built — otherwise
- * one typo silently disables the whole optimisation — and an unbuilt filter is
+ * not exist must not prevent the remaining filters from being built �?" otherwise
+ * one typo silently disables the whole optimisation �?" and an unbuilt filter is
  * safe anyway, since it simply is not consulted.
  */
 export async function rebuildAllPresenceFilters(loaders, cities = CITY_CODES) {

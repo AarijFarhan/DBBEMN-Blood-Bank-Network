@@ -14,24 +14,47 @@ router.get("/health/live", (_req, res) => {
 router.get(
   "/health/ready",
   asyncRoute(async (_req, res) => {
-    const flags = await getChaosFlags();
-    const cities = {};
-    for (const flag of Object.values(flags)) {
-      const lag = await measureReplicaLagMs(flag.cityCode);
-      cities[flag.cityCode] = {
-        primary_up: !flag.primaryDown,
-        replica_up: !flag.replicaDown,
-        extra_lag_ms: flag.extraLagMs,
-        replica_lag_ms: lag,
-        simulation: "SIMULATED",
-      };
+    try {
+      const flags = await getChaosFlags();
+      const cities = {};
+      await Promise.all(
+        Object.values(flags).map(async (flag) => {
+          try {
+            const lag = await measureReplicaLagMs(flag.cityCode);
+            cities[flag.cityCode] = {
+              primary_up: !flag.primaryDown,
+              replica_up: !flag.replicaDown,
+              extra_lag_ms: flag.extraLagMs,
+              replica_lag_ms: lag,
+              simulation: "SIMULATED",
+            };
+          } catch {
+            cities[flag.cityCode] = {
+              primary_up: !flag?.primaryDown,
+              replica_up: !flag?.replicaDown,
+              extra_lag_ms: flag?.extraLagMs ?? 0,
+              replica_lag_ms: 0,
+              simulation: "SIMULATED",
+              reachable: false,
+            };
+          }
+        }),
+      );
+      res.json({
+        status: "ready",
+        instance_id: reqInstanceId(_req),
+        topology: describeTopology(),
+        cities,
+      });
+    } catch (error) {
+      res.status(200).json({
+        status: "ready",
+        instance_id: reqInstanceId(_req),
+        topology: describeTopology(),
+        cities: {},
+        degraded: true,
+      });
     }
-    res.json({
-      status: "ready",
-      instance_id: reqInstanceId(_req),
-      topology: describeTopology(),
-      cities,
-    });
   }),
 );
 
@@ -40,48 +63,71 @@ router.get(
   authenticate,
   requireRole("SYSTEM_ADMIN"),
   asyncRoute(async (_req, res) => {
-    const flags = await getChaosFlags();
-    const status = {};
-    for (const flag of Object.values(flags)) {
-      const { read, hot } = schemasFor(flag.cityCode);
-      // Each city reads its own node, so one slow or dead city cannot make
-      // cluster-status hang on the others.
-      const cityPool = getPoolForCity(flag.cityCode);
-      // One connection for all three probes: the replica-lag probe is measured
-      // on the same client so a cluster-status sweep never needs more than one
-      // slot of a three-deep city pool.
-      const client = await cityPool.connect();
-      try {
-        const [replication, inventory, lag] = await Promise.all([
-          client.query(
-            `SELECT last_applied_event_id, last_applied_at
-             FROM ${read}.replication_state WHERE id = TRUE`,
-          ),
-          client.query(
-            `SELECT count(*) FILTER (WHERE status = 'AVAILABLE')::int AS available,
-                    count(*) FILTER (WHERE status IN ('RESERVED', 'DISPATCHED'))::int AS reserved
-             FROM ${hot}.blood_units`,
-          ),
-          measureReplicaLagMs(flag.cityCode, client),
-        ]);
-        status[flag.cityCode] = {
-          primary_up: !flag.primaryDown,
-          replica_up: !flag.replicaDown,
-          extra_lag_ms: flag.extraLagMs,
-          replica_lag_ms: lag,
-          last_applied_event_id: Number(replication.rows[0]?.last_applied_event_id ?? 0),
-          available_units: inventory.rows[0].available,
-          reserved_units: inventory.rows[0].reserved,
-          updated_at: flag.updatedAt,
-          // SIMULATED: flags represent router behavior, not killed database nodes.
-          simulation: "SIMULATED",
-          reachable: true,
-        };
-      } finally {
-        client.release();
-      }
+    try {
+      const flags = await getChaosFlags();
+      const status = {};
+      const cityCodes = Object.values(flags).map((flag) => flag.cityCode);
+      await Promise.all(
+        cityCodes.map(async (cityCode) => {
+          const flag = flags[cityCode];
+          const { read, hot } = schemasFor(cityCode);
+          const cityPool = getPoolForCity(cityCode);
+          try {
+            const client = await Promise.race([
+              cityPool.connect(),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("connect timeout")), 2000)),
+            ]);
+            try {
+              const [replication, inventory, lag] = await Promise.all([
+                Promise.race([
+                  client.query(`SELECT last_applied_event_id, last_applied_at FROM ${read}.replication_state WHERE id = TRUE`),
+                  new Promise((_, reject) => setTimeout(() => reject(new Error("replication timeout")), 2000)),
+                ]),
+                Promise.race([
+                  client.query(
+                    `SELECT count(*) FILTER (WHERE status = 'AVAILABLE')::int AS available,
+                            count(*) FILTER (WHERE status IN ('RESERVED', 'DISPATCHED'))::int AS reserved
+                     FROM ${hot}.blood_units`,
+                  ),
+                  new Promise((_, reject) => setTimeout(() => reject(new Error("inventory timeout")), 5000)),
+                ]),
+                measureReplicaLagMs(cityCode, client).catch(() => 0),
+              ]);
+              status[cityCode] = {
+                primary_up: !flag?.primaryDown,
+                replica_up: !flag?.replicaDown,
+                extra_lag_ms: flag?.extraLagMs ?? 0,
+                replica_lag_ms: lag,
+                last_applied_event_id: Number(replication.rows?.[0]?.last_applied_event_id ?? 0),
+                available_units: Number(inventory.rows?.[0]?.available ?? 0),
+                reserved_units: Number(inventory.rows?.[0]?.reserved ?? 0),
+                updated_at: flag?.updatedAt,
+                simulation: "SIMULATED",
+                reachable: true,
+              };
+            } finally {
+              client.release();
+            }
+          } catch {
+            status[cityCode] = {
+              primary_up: !flag?.primaryDown,
+              replica_up: !flag?.replicaDown,
+              extra_lag_ms: flag?.extraLagMs ?? 0,
+              replica_lag_ms: 0,
+              last_applied_event_id: 0,
+              available_units: 0,
+              reserved_units: 0,
+              updated_at: flag?.updatedAt,
+              simulation: "SIMULATED",
+              reachable: false,
+            };
+          }
+        }),
+      );
+      res.json({ instance_id: reqInstanceId(_req), topology: describeTopology(), cities: status });
+    } catch (error) {
+      res.status(200).json({ instance_id: reqInstanceId(_req), topology: describeTopology(), cities: {}, degraded: true });
     }
-    res.json({ instance_id: reqInstanceId(_req), topology: describeTopology(), cities: status });
   }),
 );
 

@@ -1,3 +1,5 @@
+import { invalidateRequests } from "./queryCache";
+
 const RENDER_API_ORIGIN = "https://dbbemn-blood-bank-network.onrender.com";
 const API_PREFIX = "/api/v1";
 
@@ -48,6 +50,7 @@ export function setSession(next) {
   const nextSession = next?.accessToken && next?.refreshToken
     ? { accessToken: next.accessToken, refreshToken: next.refreshToken }
     : null;
+  if (nextSession?.accessToken !== session?.accessToken) invalidateRequests();
   session = nextSession;
   if (typeof window !== "undefined") {
     try {
@@ -139,6 +142,7 @@ async function request(path, options = {}) {
     }
     throw makeError(response, payload);
   }
+  if (method !== "GET") invalidateRequests();
   return payload;
 }
 

@@ -1,11 +1,11 @@
-/**
+﻿/**
  * Aggregated statistics for the analytics dashboards.
  *
  * `GET /stats/overview` and `GET /stats/timeseries` scatter-gather across the
  * city shards exactly the way search does: `Promise.allSettled` per city, a
  * failed shard becomes a partial answer instead of a failed request. The
  * emergency posture of the whole system is that a partial answer served
- * instantly beats no answer, and the dashboard is no exception — a system
+ * instantly beats no answer, and the dashboard is no exception â€” a system
  * admin watching Karachi's stock during a simulated outage still sees Lahore
  * and Islamabad.
  *
@@ -17,6 +17,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { getCatalogPool, getPoolForCity } from "../db/registry.js";
+import { cacheGet, cacheSet } from "../cache/store.js";
 import { authenticate, requireRole } from "../middleware/auth.js";
 import { asyncRoute } from "../middleware/errors.js";
 import { parseQuery } from "../middleware/validate.js";
@@ -33,6 +34,172 @@ const timeseriesQuerySchema = z.object({
 
 const BLOOD_GROUPS = ["A", "B", "AB", "O"];
 const RH_FACTORS = ["POS", "NEG"];
+
+/**
+ * Per-shard statement budget. Without it a saturated shard (Karachi's disk
+ * waits for minutes) holds a pool slot and the whole scatter-gather response
+ * hangs forever, so the dashboard never gets the nine shards that did answer.
+ * A timed-out city is reported as unavailable, exactly like a failed connect.
+ */
+const SHARD_TIMEOUT_MS = (() => {
+  const parsed = Number(process.env.STATS_SHARD_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 300000) : 60000;
+})();
+
+/** Run work on a city client whose statements are bounded by SHARD_TIMEOUT_MS. */
+async function withCityStatsClient(cityCode, work) {
+  const client = await getPoolForCity(cityCode).connect();
+  try {
+    await client.query(`SET statement_timeout = ${Math.max(1000, SHARD_TIMEOUT_MS)}`);
+    return await work(client);
+  } finally {
+    try {
+      await client.query("RESET statement_timeout");
+    } catch {
+      // Connection already gone; release discards it.
+    }
+    client.release();
+  }
+}
+
+/**
+ * Per-city cache, because the aggregates scan every unit row on that shard.
+ *
+ * Ten shards on one spinning disk cannot answer in parallel: five of them hold
+ * 5M units each, so a cold overview was taking 30-45s and timing shards out.
+ * Once a city has been counted its payload is reused for a minute, and a stale
+ * payload is served immediately while a refresh runs in the background. That
+ * keeps the dashboard fast and, more importantly, keeps showing the last known
+ * numbers for a shard that is currently saturated instead of dropping it.
+ */
+const STATS_CACHE_TTL_SECONDS = 900;
+const STATS_FRESH_MS = 60_000;
+const cityInflight = new Map();
+
+function cityCacheKey(cityCode, bankId) {
+  return `stats:city:${cityCode}:${bankId ?? "all"}`;
+}
+
+async function computeCityStats(cityCode, bankId) {
+  const { hot, hist } = schemasFor(cityCode);
+  const bankFilter = bankId ? " WHERE blood_bank_id = $1" : "";
+  const bankValues = bankId ? [bankId] : [];
+  // One connection for all five aggregates, each statement bounded by the
+  // shard timeout. node-postgres queues queries on a single client, so this
+  // costs nothing in latency but stops one dashboard request from holding
+  // every slot of a small city pool.
+  return withCityStatsClient(cityCode, async (client) => {
+    const matrix = await client.query(
+      `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
+              component_type::text AS "componentType", status::text AS status,
+              count(*)::int AS count
+         FROM ${hot}.blood_units
+         ${bankFilter}
+         GROUP BY 1, 2, 3, 4`,
+      bankValues,
+    );
+    const reservations = bankId
+      ? await client.query(
+          `SELECT r.status::text AS status, r.urgency::text AS urgency, count(*)::int AS count
+             FROM ${hot}.reservations r
+             JOIN ${hot}.blood_units u ON u.unit_id = r.unit_id
+             WHERE u.blood_bank_id = $1
+             GROUP BY 1, 2`,
+          bankValues,
+        )
+      : await client.query(
+          `SELECT status::text AS status, urgency::text AS urgency, count(*)::int AS count
+             FROM ${hot}.reservations
+             GROUP BY 1, 2`,
+        );
+    const donations = await client.query(
+      `SELECT count(*)::int AS count
+         FROM ${hist}.donations
+         WHERE collected_at >= now() - interval '30 days'${bankId ? " AND blood_bank_id = $1" : ""}`,
+      bankValues,
+    );
+    // Joining 15k transfusions against 5M units makes PostgreSQL scan the whole
+    // unit table and can take tens of seconds on a busy shard. For the
+    // system-wide view there is nothing to filter, and for a bank we probe the
+    // unit primary key instead of joining the full table.
+    const transfusions = bankId
+      ? await client.query(
+          `SELECT count(*)::int AS count
+             FROM ${hist}.transfusions t
+             WHERE t.transfused_at >= now() - interval '30 days'
+               AND EXISTS (
+                 SELECT 1 FROM ${hot}.blood_units u
+                 WHERE u.unit_id = t.unit_id AND u.blood_bank_id = $1
+               )`,
+          [bankId],
+        )
+      : await client.query(
+          `SELECT count(*)::int AS count
+             FROM ${hist}.transfusions
+             WHERE transfused_at >= now() - interval '30 days'`,
+        );
+    // Expiry pressure is computed per shard in SQL so the dashboard never
+    // pulls every row over the wire just to count the urgent ones.
+    const expiry = await client.query(
+      `SELECT count(*)::int AS "expiring7d",
+              count(*) FILTER (WHERE expiry_date <= CURRENT_DATE)::int AS expired
+       FROM ${hot}.blood_units
+       WHERE expiry_date <= CURRENT_DATE + 7
+         AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED')${bankId ? " AND blood_bank_id = $1" : ""}`,
+      bankValues,
+    );
+    return {
+      cityCode,
+      matrixRows: matrix.rows,
+      reservationRows: reservations.rows,
+      donationsCount: donations.rows[0]?.count ?? 0,
+      transfusionsCount: transfusions.rows[0]?.count ?? 0,
+      expiry: {
+        ...expiry.rows[0],
+        available: matrix.rows.reduce((sum, row) => sum + (row.status === "AVAILABLE" ? row.count : 0), 0),
+        reserved: matrix.rows.reduce((sum, row) => sum + (row.status === "RESERVED" ? row.count : 0), 0),
+        quarantine: matrix.rows.reduce((sum, row) => sum + (row.status === "QUARANTINE" ? row.count : 0), 0),
+      },
+    };
+  });
+}
+
+async function refreshCityStats(cityCode, bankId) {
+  const key = cityCacheKey(cityCode, bankId);
+  const existing = cityInflight.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    const payload = { ...(await computeCityStats(cityCode, bankId)), savedAt: Date.now() };
+    await cacheSet(key, JSON.stringify(payload), STATS_CACHE_TTL_SECONDS);
+    return payload;
+  })();
+  cityInflight.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    cityInflight.delete(key);
+  }
+}
+
+async function loadCityStats(cityCode, bankId) {
+  const raw = await cacheGet(cityCacheKey(cityCode, bankId));
+  let cached = null;
+  if (raw) {
+    try {
+      cached = JSON.parse(raw);
+    } catch {
+      cached = null;
+    }
+  }
+  if (cached?.savedAt) {
+    if (Date.now() - cached.savedAt < STATS_FRESH_MS) return cached;
+    refreshCityStats(cityCode, bankId).catch((error) => {
+      log.warn({ err: error.message, cityCode }, "stats background refresh failed; serving cached city");
+    });
+    return cached;
+  }
+  return refreshCityStats(cityCode, bankId);
+}
 
 /** Cities this caller is allowed to aggregate over, resolved from their role. */
 async function scopedCities(req) {
@@ -58,59 +225,16 @@ router.get(
     const flags = await getChaosFlags();
 
     // Scatter-gather: one round trip per city, isolated failure per city.
+    // Cached cities answer without touching PostgreSQL; stale ones are served
+    // immediately and refreshed in the background.
     const settled = await Promise.allSettled(
-      cities.map(async (cityCode) => {
-        const { hot, hist } = schemasFor(cityCode);
-        const pool = getPoolForCity(cityCode);
-        // One connection for all four aggregates. node-postgres queues queries
-        // on a single client anyway, so this costs nothing in latency - but it
-        // stops one dashboard request from holding four slots of a three-deep
-        // city pool and starving every other request on that shard.
-        const client = await pool.connect();
-        try {
-          const [matrix, reservations, donations, transfusions] = await Promise.all([
-            client.query(
-              `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
-                    component_type::text AS "componentType", status::text AS status,
-                    count(*)::int AS count
-               FROM ${hot}.blood_units
-               WHERE ($1::uuid IS NULL OR blood_bank_id = $1)
-               GROUP BY 1, 2, 3, 4`,
-              [bankId],
-            ),
-            client.query(
-              `SELECT r.status::text AS status, r.urgency::text AS urgency, count(*)::int AS count
-               FROM ${hot}.reservations r
-               JOIN ${hot}.blood_units u ON u.unit_id = r.unit_id
-               WHERE ($1::uuid IS NULL OR u.blood_bank_id = $1)
-               GROUP BY 1, 2`,
-              [bankId],
-            ),
-            client.query(
-              `SELECT count(*)::int AS count
-               FROM ${hist}.donations
-               WHERE collected_at >= now() - interval '30 days'
-                 AND ($1::uuid IS NULL OR blood_bank_id = $1)`,
-              [bankId],
-            ),
-            client.query(
-              `SELECT count(*)::int AS count
-               FROM ${hist}.transfusions
-               WHERE transfused_at >= now() - interval '30 days'
-                 AND ($1::uuid IS NULL OR hospital_id IS NOT NULL)`,
-              [],
-            ),
-          ]);
-          return { cityCode, matrix, reservations, donations, transfusions };
-        } finally {
-          client.release();
-        }
-      }),
+      cities.map((cityCode) => loadCityStats(cityCode, bankId)),
     );
 
     const unavailableCities = [];
     const totals = Object.create(null);
     const byCity = Object.create(null);
+    const expiringByCity = Object.create(null);
     const groupTotals = Object.fromEntries(
       BLOOD_GROUPS.flatMap((group) => RH_FACTORS.map((rh) => [`${group}${rh}`, 0])),
     );
@@ -126,9 +250,9 @@ router.get(
         log.warn({ err: outcome.reason.message, cityCode }, "stats shard unavailable");
         return;
       }
-      const { matrix, reservations, donations, transfusions } = outcome.value;
+      const { matrixRows, reservationRows, donationsCount, transfusionsCount, expiry } = outcome.value;
       const cityMatrix = Object.create(null);
-      for (const row of matrix.rows) {
+      for (const row of matrixRows) {
         const key = `${row.bloodGroup}${row.rhFactor}`;
         groupTotals[key] = (groupTotals[key] ?? 0) + row.count;
         totals[row.status] = (totals[row.status] ?? 0) + row.count;
@@ -136,38 +260,15 @@ router.get(
         if (!cityMatrix[row.componentType][key]) cityMatrix[row.componentType][key] = 0;
         cityMatrix[row.componentType][key] += row.count;
       }
-      for (const row of reservations.rows) {
+      for (const row of reservationRows) {
         reservationsByStatus[row.status] = (reservationsByStatus[row.status] ?? 0) + row.count;
         reservationsByUrgency[row.urgency] = (reservationsByUrgency[row.urgency] ?? 0) + row.count;
       }
-      donationsLast30Days += donations.rows[0]?.count ?? 0;
-      transfusionsLast30Days += transfusions.rows[0]?.count ?? 0;
+      donationsLast30Days += donationsCount;
+      transfusionsLast30Days += transfusionsCount;
+      if (expiry) expiringByCity[cityCode] = expiry;
       byCity[cityCode] = { matrix: cityMatrix };
     });
-
-    // Expiry pressure is computed per shard in SQL so the dashboard never has
-    // to pull every row over the wire just to count the urgent ones.
-    const expiringByCity = Object.create(null);
-    await Promise.allSettled(
-      cities
-        .filter((cityCode) => !unavailableCities.includes(cityCode))
-        .map(async (cityCode) => {
-          const { hot } = schemasFor(cityCode);
-          const result = await getPoolForCity(cityCode).query(
-            `SELECT count(*) FILTER (WHERE expiry_date <= CURRENT_DATE + 7
-                                     AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED'))::int AS "expiring7d",
-                    count(*) FILTER (WHERE expiry_date <= CURRENT_DATE
-                                     AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED'))::int AS "expired",
-                    count(*) FILTER (WHERE status = 'AVAILABLE')::int AS available,
-                    count(*) FILTER (WHERE status = 'RESERVED')::int AS reserved,
-                    count(*) FILTER (WHERE status = 'QUARANTINE')::int AS quarantine
-             FROM ${hot}.blood_units
-             WHERE ($1::uuid IS NULL OR blood_bank_id = $1)`,
-            [scopedBankId(req)],
-          );
-          expiringByCity[cityCode] = result.rows[0];
-        }),
-    );
 
     const flagsSummary = {};
     for (const cityCode of cities) {
@@ -223,15 +324,17 @@ router.get(
     const settled = await Promise.allSettled(
       cities.map(async (cityCode) => {
         const { hist } = schemasFor(cityCode);
-        const result = await getPoolForCity(cityCode).query(
-          `SELECT date_trunc('day', collected_at)::date AS day,
-                  count(*)::int AS donations
-           FROM ${hist}.donations
-           WHERE collected_at >= now() - ($1::int * interval '1 day')
-             AND ($2::uuid IS NULL OR blood_bank_id = $2)
-           GROUP BY 1
-           ORDER BY 1`,
-          [days, bankId],
+        const result = await withCityStatsClient(cityCode, (client) =>
+          client.query(
+            `SELECT date_trunc('day', collected_at)::date AS day,
+                    count(*)::int AS donations
+             FROM ${hist}.donations
+             WHERE collected_at >= now() - ($1::int * interval '1 day')
+               ${bankId ? "AND blood_bank_id = $2" : ""}
+             GROUP BY 1
+             ORDER BY 1`,
+            bankId ? [days, bankId] : [days],
+          ),
         );
         return result.rows;
       }),

@@ -113,10 +113,12 @@ router.get(
     const scope = await requesterScope(req);
     const cities = query.city ? [query.city] : scope.cities;
 
+    const offset = (query.page - 1) * query.limit;
+    const fetchLimit = query.limit + 1;
     const results = await Promise.all(
       cities.map(async (cityCode) => {
         const { hot, hist } = schemasFor(cityCode);
-        const values = [scope.value, query.status ?? null, query.limit];
+        const values = [scope.value, query.status ?? null, fetchLimit, offset];
         const issuerFilter = scope.column
           ? `r.${scope.column} = $1`
           : `($1::uuid IS NULL OR r.requested_by_hospital_id = $1 OR r.requested_by_blood_bank_id = $1)`;
@@ -127,21 +129,24 @@ router.get(
            WHERE ${issuerFilter}
              AND ($2::common.donor_request_status_t IS NULL OR r.status = $2)
            ORDER BY r.requested_at DESC
-           LIMIT $3`,
+           LIMIT $3 OFFSET $4`,
           values,
         );
         return rows.rows;
       }),
     );
 
-    const requests = await attachIssuerNames(
-      results
-        .flat()
-        .sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt))
-        .slice(0, query.limit),
-    );
+    const allMerged = results
+      .flat()
+      .sort((a, b) => new Date(b.requestedAt) - new Date(a.requestedAt));
+    const hasMore = allMerged.length > query.limit;
+    const sliced = allMerged.slice(0, query.limit);
+    const requests = await attachIssuerNames(sliced);
     res.json({
       requests,
+      page: query.page,
+      limit: query.limit,
+      hasMore,
       total: requests.length,
       byStatus: requests.reduce((acc, item) => ({ ...acc, [item.status]: (acc[item.status] ?? 0) + 1 }), {}),
     });

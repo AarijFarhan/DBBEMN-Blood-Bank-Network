@@ -100,7 +100,7 @@ export const env = Object.freeze({
   holdMinutes: numberFromEnv("HOLD_MINUTES", 30, { min: 1, max: 240 }),
   criticalHoldMinutes: numberFromEnv("CRITICAL_HOLD_MINUTES", 60, { min: 1, max: 360 }),
   replicaLagMs: numberFromEnv("REPLICA_LAG_MS", 750, { min: 0, max: 60000 }),
-  searchShardTimeoutMs: numberFromEnv("SEARCH_SHARD_TIMEOUT_MS", 1500, { min: 50, max: 30000 }),
+  searchShardTimeoutMs: numberFromEnv("SEARCH_SHARD_TIMEOUT_MS", 1500, { min: 50, max: 120000 }),
   instanceId: process.env.INSTANCE_ID || randomUUID(),
   frontendDist: new URL("../../../frontend/dist/", import.meta.url),
 

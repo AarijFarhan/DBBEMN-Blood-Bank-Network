@@ -565,6 +565,18 @@ button:focus-visible, a:focus-visible, .nav-item:focus-visible { outline: none; 
 .workspace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
 .workspace-grid-wide { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 18px; }
 
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 16px;
+}
+.pagination-summary,
+.pagination-page { color: var(--muted); font-size: 12.5px; }
+.pagination-actions { display: flex; align-items: center; gap: 10px; }
+.facility-form-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
 /* ==========================================================================
    Stats
    ========================================================================== */
@@ -1447,6 +1459,7 @@ button:focus-visible, a:focus-visible, .nav-item:focus-visible { outline: none; 
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .result-grid, .telemetry-grid, .callout-grid { grid-template-columns: 1fr; }
   .app-footer { flex-direction: column; align-items: flex-start; }
+  .pagination-controls { align-items: flex-start; flex-direction: column; }
 }
 
 /* ==========================================================================

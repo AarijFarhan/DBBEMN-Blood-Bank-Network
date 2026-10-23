@@ -77,7 +77,8 @@ export const respondDonorRequestSchema = z.object({
 export const donorRequestQuerySchema = z.object({
   city: cityCodeSchema.optional(),
   status: z.enum(["PENDING", "ACCEPTED", "DECLINED", "CANCELLED", "EXPIRED"]).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(50).default(25),
+  page: z.coerce.number().int().min(1).default(1),
 });
 
 export const reservationRequestSchema = z.object({

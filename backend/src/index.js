@@ -6,7 +6,7 @@ import { startBackgroundJobs } from "./jobs/maintenance.js";
 import { closeCache, initCache } from "./cache/store.js";
 import { closeShared, initShared } from "./cache/shared.js";
 import { initEventBus } from "./lib/bus.js";
-import { PRESENCE_LOADERS, rebuildAllPresenceFilters } from "./services/presence.js";
+import { PRESENCE_LOADERS, allPresenceFiltersTrusted, rebuildAllPresenceFilters } from "./services/presence.js";
 import { describeSizing } from "./cache/bloom.js";
 
 const healthy = await waitForDatabases();
@@ -26,22 +26,32 @@ const sharedMode = await initShared();
 const busMode = initEventBus();
 logger.info({ sharedMode, busMode }, "shared state ready");
 
-// Rebuild presence filters at boot so cross-shard lookups can narrow on the first
-// request. Best-effort and never fatal — an unbuilt filter is a full scan, which
-// is the behaviour from before this optimisation existed.
-if (env.bloom.enabled && cacheMode !== "off") {
-  try {
-    const rebuilt = await rebuildAllPresenceFilters(PRESENCE_LOADERS);
-    logger.info({ filters: rebuilt.length, inserted: rebuilt.reduce((sum, f) => sum + f.inserted, 0) }, "presence filters rebuilt");
-  } catch (error) {
-    logger.error({ err: error.message }, "presence filter rebuild failed; lookups will scan every city");
-  }
-}
-
 const stopBackgroundJobs = startBackgroundJobs(logger);
 const server = app.listen(env.port, "0.0.0.0", () => {
   logger.info({ port: env.port, instanceId: env.instanceId }, "DBBEMN API listening");
 });
+
+// Rebuild presence filters so cross-shard lookups can narrow on the first
+// request. This runs after listen and is never fatal: a filter is only trusted
+// once rebuilt, so requests served during the rebuild simply fall back to a
+// full scan. Awaiting this before listen used to keep the API offline for
+// minutes on a large dataset, which made every page and login look broken.
+if (env.bloom.enabled && cacheMode !== "off") {
+  void (async () => {
+    if (await allPresenceFiltersTrusted(PRESENCE_LOADERS)) {
+      logger.info("presence filters already trusted; skipping boot rebuild");
+      return;
+    }
+    return rebuildAllPresenceFilters(PRESENCE_LOADERS);
+  })()
+    .then((rebuilt) => {
+      if (!rebuilt) return;
+      logger.info({ filters: rebuilt.length, inserted: rebuilt.reduce((sum, f) => sum + f.inserted, 0) }, "presence filters rebuilt");
+    })
+    .catch((error) => {
+      logger.error({ err: error.message }, "presence filter rebuild failed; lookups will scan every city");
+    });
+}
 
 async function shutdown(signal) {
   logger.info({ signal }, "shutting down");

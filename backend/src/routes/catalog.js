@@ -151,16 +151,23 @@ router.get(
   "/admin/users",
   authenticate,
   requireRole("SYSTEM_ADMIN"),
-  asyncRoute(async (_req, res) => {
+  asyncRoute(async (req, res) => {
+    const page = Math.max(1, parseInt(req.query.page ?? "1", 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? "25", 10) || 25));
+    const offset = (page - 1) * limit;
     const result = await getCatalogPool().query(
       `SELECT user_id AS "userId", username, email, role,
               hospital_id AS "hospitalId", blood_bank_id AS "bloodBankId",
               donor_id AS "donorId", donor_city_code AS "donorCityCode",
               is_active AS "isActive", created_at AS "createdAt"
        FROM catalog.users
-       ORDER BY role, username`,
+       ORDER BY role, username
+       LIMIT $1 OFFSET $2`,
+      [limit + 1, offset],
     );
-    res.json({ users: result.rows });
+    const hasMore = result.rows.length > limit;
+    const users = hasMore ? result.rows.slice(0, limit) : result.rows;
+    res.json({ users, page, limit, hasMore });
   }),
 );
 

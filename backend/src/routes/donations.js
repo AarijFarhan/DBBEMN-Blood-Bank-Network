@@ -43,7 +43,8 @@ const screeningSchema = z.object({ screeningStatus: z.enum(["PASSED", "FAILED"])
 const listQuerySchema = z.object({
   donorId: uuidSchema.optional(),
   city: cityCodeSchema.optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(50).default(25),
+  page: z.coerce.number().int().min(1).default(1),
 });
 const MINIMUM_AGE = 18;
 const MAXIMUM_AGE = 65;
@@ -267,6 +268,9 @@ router.get(
       cities = query.city ? [query.city] : CITY_CODES;
     }
 
+    const offset = (query.page - 1) * query.limit;
+    // Fetch one extra row to detect if there is a next page.
+    const fetchLimit = query.limit + 1;
     const rows = await Promise.all(
       cities.map(async (cityCode) => {
         const { hist } = schemasFor(cityCode);
@@ -279,13 +283,16 @@ router.get(
            WHERE ($1::uuid IS NULL OR d.donor_id = $1)
              AND ($2::uuid IS NULL OR d.blood_bank_id = $2)
            ORDER BY d.collected_at DESC
-           LIMIT $3`,
-          [donorId ?? null, bloodBankId, query.limit],
+           LIMIT $3 OFFSET $4`,
+          [donorId ?? null, bloodBankId, fetchLimit, offset],
         );
         return result.rows;
       }),
     );
-    res.json({ donations: rows.flat() });
+    const allRows = rows.flat();
+    const hasMore = allRows.length > query.limit;
+    const donations = hasMore ? allRows.slice(0, query.limit) : allRows;
+    res.json({ donations, page: query.page, limit: query.limit, hasMore });
   }),
 );
 

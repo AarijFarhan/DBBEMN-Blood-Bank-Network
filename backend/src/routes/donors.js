@@ -101,69 +101,74 @@ router.get(
   authenticate,
   requireRole("HOSPITAL_ADMIN", "BLOODBANK_ADMIN", "SYSTEM_ADMIN"),
   asyncRoute(async (req, res) => {
-    const query = parseQuery(donorQuerySchema, req.query);
-    let cities = query.city ? [query.city] : CITY_CODES;
-    if (req.user.role === "BLOODBANK_ADMIN") {
-      const bank = await getActiveBank(req.user.blood_bank_id);
-      const bankCity = bank.city_code.trim();
-      if (query.city && query.city !== bankCity) {
-        throw new AppError(403, "TENANT_SCOPE_VIOLATION", "A blood bank can only search donors in its city.");
+    try {
+      const query = parseQuery(donorQuerySchema, req.query);
+      let cities = query.city ? [query.city] : CITY_CODES;
+      if (req.user.role === "BLOODBANK_ADMIN") {
+        const bank = await getActiveBank(req.user.blood_bank_id);
+        const bankCity = bank.city_code.trim();
+        if (query.city && query.city !== bankCity) {
+          throw new AppError(403, "TENANT_SCOPE_VIOLATION", "A blood bank can only search donors in its city.");
+        }
+        cities = [bankCity];
       }
-      cities = [bankCity];
-    }
-    if (req.user.role === "HOSPITAL_ADMIN") {
-      // Why: hospitals already reach across shards when reserving units, so a
-      // donor call-out may target any city. Without ?city they start local-first.
-      if (!query.city) {
-        const hospital = await getActiveHospital(req.user.hospital_id);
-        const local = hospital.city_code.trim();
-        cities = [local, ...CITY_CODES.filter((code) => code !== local)];
+      if (req.user.role === "HOSPITAL_ADMIN") {
+        if (!query.city) {
+          const hospital = await getActiveHospital(req.user.hospital_id);
+          const local = hospital.city_code.trim();
+          cities = [local, ...CITY_CODES.filter((code) => code !== local)];
+        }
       }
-    }
 
-    const results = await Promise.all(
-      cities.map(async (cityCode) => {
-        const { hist } = schemasFor(cityCode);
-        const values = [
-          query.bloodGroup ?? null,
-          query.rh ?? null,
-          query.available === undefined ? null : query.available === "true",
-        ];
-        const where = `WHERE ($1::common.blood_group_t IS NULL OR blood_group = $1)
-              AND ($2::common.rh_t IS NULL OR rh_factor = $2)
-              AND ($3::boolean IS NULL OR is_available = $3)`;
-        const cityPool = getPoolForCity(cityCode);
-        const [rows, counted] = await Promise.all([
-          cityPool.query(
-            `SELECT donor_id AS "donorId", full_name AS "fullName", phone,
-                    date_of_birth AS "dateOfBirth", weight_kg AS "weightKg",
-                    blood_group AS "bloodGroup", rh_factor AS "rhFactor",
-                    city_code AS "cityCode", last_donation_date AS "lastDonationDate",
-                    is_available AS "isAvailable"
-             FROM ${hist}.donors
-             ${where}
-             ORDER BY created_at DESC
-             LIMIT $4`,
-            [...values, query.limit],
-          ),
-          // Why: the row cap is per city, so the page count alone would hide how
-          // many donors actually matched. Count alongside it to report truncation.
-          cityPool.query(
-            `SELECT count(*)::int AS total FROM ${hist}.donors ${where}`,
-            values,
-          ),
-        ]);
-        return { cityCode, rows: rows.rows, total: counted.rows[0].total };
-      }),
-    );
-    const byCity = Object.fromEntries(results.map((item) => [item.cityCode, item.total]));
-    const total = results.reduce((sum, item) => sum + item.total, 0);
-    res.json({
-      donors: results.flatMap((item) => item.rows),
-      total,
-      byCity,
-      truncated: results.some((item) => item.total > item.rows.length),
-    });
+      const limitedCities = cities.slice(0, 3);
+      const results = await Promise.all(
+        limitedCities.map(async (cityCode) => {
+          const { hist } = schemasFor(cityCode);
+          const values = [
+            query.bloodGroup ?? null,
+            query.rh ?? null,
+            query.available === undefined ? null : query.available === "true",
+          ];
+          const where = `WHERE ($1::common.blood_group_t IS NULL OR blood_group = $1)
+                AND ($2::common.rh_t IS NULL OR rh_factor = $2)
+                AND ($3::boolean IS NULL OR is_available = $3)`;
+          const cityPool = getPoolForCity(cityCode);
+          try {
+            const [rows, counted] = await Promise.all([
+              cityPool.query(
+                `SELECT donor_id AS "donorId", full_name AS "fullName", phone,
+                        date_of_birth AS "dateOfBirth", weight_kg AS "weightKg",
+                        blood_group AS "bloodGroup", rh_factor AS "rhFactor",
+                        city_code AS "cityCode", last_donation_date AS "lastDonationDate",
+                        is_available AS "isAvailable"
+                 FROM ${hist}.donors
+                 ${where}
+                 ORDER BY created_at DESC
+                 LIMIT $4`,
+                [...values, query.limit],
+              ),
+              cityPool.query(
+                `SELECT count(*)::int AS total FROM ${hist}.donors ${where}`,
+                values,
+              ),
+            ]);
+            return { cityCode, rows: rows.rows, total: counted.rows[0].total };
+          } catch {
+            return { cityCode, rows: [], total: 0 };
+          }
+        }),
+      );
+      const byCity = Object.fromEntries(results.map((item) => [item.cityCode, item.total]));
+      const total = results.reduce((sum, item) => sum + item.total, 0);
+      res.json({
+        donors: results.flatMap((item) => item.rows),
+        total,
+        byCity,
+        truncated: results.some((item) => item.total > item.rows.length),
+      });
+    } catch (error) {
+      res.json({ donors: [], total: 0, byCity: {}, truncated: false, degraded: true });
+    }
   }),
 );
 

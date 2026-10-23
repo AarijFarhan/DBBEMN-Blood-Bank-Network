@@ -27,7 +27,8 @@ const unitsQuerySchema = z.object({
   bankId: uuidSchema.optional(),
   status: unitStatusSchema.optional(),
   city: cityCodeSchema.optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(50).default(25),
+  page: z.coerce.number().int().min(1).default(1),
 });
 const cityQuerySchema = z.object({ city: cityCodeSchema.optional() });
 
@@ -73,6 +74,8 @@ router.get(
       bankId = req.user.blood_bank_id;
     }
     const cities = await accessibleCities(req, query.city);
+    const offset = (query.page - 1) * query.limit;
+    const fetchLimit = query.limit + 1;
     const result = await Promise.all(
       cities.map(async (cityCode) => {
         const { hot } = schemasFor(cityCode);
@@ -87,13 +90,16 @@ router.get(
            WHERE ($1::uuid IS NULL OR blood_bank_id = $1)
              AND ($2::common.unit_status_t IS NULL OR status = $2)
            ORDER BY expiry_date, unit_id
-           LIMIT $3`,
-          [bankId, query.status ?? null, query.limit],
+           LIMIT $3 OFFSET $4`,
+          [bankId, query.status ?? null, fetchLimit, offset],
         );
         return units.rows;
       }),
     );
-    res.json({ units: result.flat() });
+    const allRows = result.flat();
+    const hasMore = allRows.length > query.limit;
+    const units = hasMore ? allRows.slice(0, query.limit) : allRows;
+    res.json({ units, page: query.page, limit: query.limit, hasMore });
   }),
 );
 
