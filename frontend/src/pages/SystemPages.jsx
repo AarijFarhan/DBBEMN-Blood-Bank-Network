@@ -75,7 +75,7 @@ export function HealthPage() {
       <PageHeader eyebrow="System workspace" title="Service health" description="Live PostgreSQL connection and role probes for every configured city primary and physical replica." actions={<Button variant="secondary" onClick={request.reload}>Refresh checks</Button>} />
       {request.loading ? <SectionCard><LoadingState label="Checking service health" /></SectionCard> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}
       {request.data ? <>
-        <div className="stat-grid"><div className={`stat-card ${ready?.status === "ready" ? "stat-card-green" : "stat-card-amber"}`}><span>Database readiness</span><strong>{ready?.status || "Unknown"}</strong><small>Actual primary connection checks</small></div><div className="stat-card stat-card-blue"><span>Liveness</span><strong>{request.data.live?.status || "Unknown"}</strong><small>API process response</small></div><div className="stat-card stat-card-purple"><span>Responding primaries</span><strong>{respondingCities} / {cities.length || "—"}</strong><small>{streamingReplicas} streaming replicas</small></div><div className="stat-card stat-card-slate"><span>Instance</span><strong className="stat-instance">{ready?.instance_id || "—"}</strong><small>Monitoring API</small></div></div>
+        <div className="stat-grid"><div className={`stat-card ${ready?.status === "ready" ? "stat-card-green" : "stat-card-amber"}`}><span>Database readiness</span><strong>{ready?.status || "Unknown"}</strong><small>Actual primary connection checks</small></div><div className="stat-card stat-card-blue"><span>Liveness</span><strong>{request.data.live?.status || "Unknown"}</strong><small>API process response</small></div><div className="stat-card stat-card-purple"><span>Responding primaries</span><strong>{respondingCities} / {cities.length || "—"}</strong>Active Cities</div><div className="stat-card stat-card-slate"><span>Instance</span><strong className="stat-instance">{ready?.instance_id || "—"}</strong><small>Monitoring API</small></div></div>
         {ready?.status === "degraded" ? <Notice tone="error" title="Database readiness degraded">The catalog or one or more configured city primary databases could not be reached or did not report the expected primary role.</Notice> : null}
         <SectionCard title="Live city database status" description="Your configured catalog and city databases are checked directly. A physical standby is optional and separate from the city databases themselves.">
           {cities.length ? <div className="health-grid">
@@ -90,7 +90,7 @@ export function HealthPage() {
             const healthy = primary?.status === "up";
             return <article className="health-card" key={city.code}>
               <div className="health-card-top"><strong>{city.code}</strong><StatusBadge status={healthy ? "Connected" : "Attention"} /></div>
-              <div className="health-signal-row"><span className={`signal-dot ${healthy ? "signal-up" : "signal-down"}`} /><div><span>Primary database</span><strong>{databaseNodeLabel(primary, "primary")}</strong></div></div>
+              <div className="health-signal-row"><span className={`signal-dot ${healthy ? "signal-up" : "signal-down"}`} /><div><span>Database Status</span><strong>{databaseNodeLabel(primary, "primary")}</strong></div></div>
                 {replica?.configured ? (
                   <div className="health-signal-row"><span className={`signal-dot ${replica.status === "up" ? "signal-up" : "signal-down"}`} /><div><span>Optional physical standby</span><strong>{databaseNodeLabel(replica, "replica")}</strong></div></div>
                 ) : null}
@@ -709,7 +709,7 @@ export function ClusterPage() {
                   <StatusBadge status={healthy ? replica?.configured ? "Healthy" : "Connected" : "Attention"} />
                 </div>
                 <div className="telemetry-signal">
-                  <span>Primary database</span>
+                  <span>Database</span>
                   <strong>{databaseNodeLabel(primary, "primary")}</strong>
                 </div>
                 {primary?.configured && primary?.status !== "unavailable" ? (
@@ -735,10 +735,8 @@ export function ClusterPage() {
                 <div className="telemetry-metrics">
                   <div><span>Inventory</span><strong>{city.reachable && city.available_units != null ? `~${formatNumber(city.available_units)}` : "Unavailable"}</strong><small>available · estimated</small></div>
                   <div><span>Holds</span><strong>{city.reachable && city.reserved_units != null ? `~${formatNumber(city.reserved_units)}` : "Unavailable"}</strong><small>reserved · estimated</small></div>
-                  <div><span>Primary connections</span><strong>{primary?.connections == null ? "—" : `${formatNumber(primary.connections)} / ${formatNumber(primary.max_connections)}`}</strong><small>connected / max</small></div>
-                  {replica?.configured ? (
-                    <div><span>Streaming replicas</span><strong>{primary?.streaming_replicas == null ? "—" : formatNumber(primary.streaming_replicas)}</strong><small>connected to primary</small></div>
-                  ) : null}
+                 <div><></></div>
+                  
                   {replica?.configured ? (
                     <div><span>Replica WAL lag</span><strong>{replica?.replay_lag_bytes == null ? "—" : `${formatNumber(replica.replay_lag_bytes)} B`}</strong><small>{replica?.replay_delay_ms == null ? "no replay timestamp" : `last replay ${formatNumber(replica.replay_delay_ms)} ms ago`}</small></div>
                   ) : null}

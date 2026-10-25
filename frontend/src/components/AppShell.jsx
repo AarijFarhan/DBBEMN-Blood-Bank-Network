@@ -150,7 +150,7 @@ export default function AppShell() {
         </main>
         <footer className="app-footer">
           <span>DBBEMN operations portal</span>
-          <span>Availability signals may be delayed across the network.</span>
+          
         </footer>
       </div>
     </div>
