@@ -128,13 +128,14 @@ export function DonorDirectoryPage() {
         ...(bloodGroup ? { bloodGroup } : {}),
         ...(rh ? { rh } : {}),
         ...(availableOnly ? { available: "true" } : {}),
-        limit: 100,
+        page,
+        limit: pageSize,
       }),
-    [debouncedSearch, city, bloodGroup, rh, availableOnly],
+    [page, pageSize, debouncedSearch, city, bloodGroup, rh, availableOnly],
   );
 
   const donors = listFrom(request.data, ["donors"]);
-  const pageDonors = donors.slice((page - 1) * pageSize, page * pageSize);
+  const pageDonors = donors;
   const totalMatched = request.data?.total ?? donors.length;
   const availableCount = donors.filter((donor) => donor.isAvailable).length;
   const byCity = request.data?.byCity || {};
@@ -161,10 +162,10 @@ export function DonorDirectoryPage() {
       <PageHeader
         eyebrow="System workspace"
         title="Donor directory"
-        description="Every donor profile held in the city history shards, with the availability signal blood banks read when scheduling a collection."
+        description="Search and page through donor profiles across all selected city shards."
         actions={<Button variant="secondary" onClick={request.reload} disabled={request.loading}>Refresh directory</Button>}
       />
-      <SectionCard title="Search & filters" description="Search donor name, phone, or ID across all 10 city shards. Up to 100 matching donors per shard are listed, with 20 donors per page.">
+      <SectionCard title="Search & filters" description="Search donor name, phone, or ID across all 10 city shards. Results are merged into one paginated directory.">
         <div className="form-grid form-grid-four">
           <Field label="Search donors">
             <span className="search-input-wrap">
@@ -200,17 +201,17 @@ export function DonorDirectoryPage() {
       {request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}
       {request.data ? <>
         {request.data.meta?.unavailableCities?.length ? <Notice tone="warning" title="Partial donor results">These city shards did not respond: {request.data.meta.unavailableCities.join(", ")}. Refresh to retry.</Notice> : null}
-        {request.data.truncated ? <Notice tone="warning" title="Results are capped per city">{formatNumber(donors.length)} of {formatNumber(totalMatched)} matching donors are listed. {Object.entries(byCity).map(([code, count]) => `${code}: ${formatNumber(count)}`).join(" · ")}. Narrow the city or blood group filter to see the rest.</Notice> : null}
+        {request.data.totalApproximate ? <Notice tone="info" title="Estimated network total">The total uses PostgreSQL row statistics; this page of donor rows is merged from every responding shard.</Notice> : null}
         <div className="stat-grid">
-          <div className="stat-card stat-card-blue"><span>Donors matched</span><strong>{formatNumber(totalMatched)}</strong><small>Across the selected shards</small></div>
-          <div className="stat-card stat-card-green"><span>Listed here</span><strong>{formatNumber(donors.length)}</strong><small>{request.data.truncated ? "Capped at 100 per city" : "Complete result set"}</small></div>
+          <div className="stat-card stat-card-blue"><span>{request.data.totalApproximate ? "Estimated donors" : "Donors matched"}</span><strong>{formatNumber(totalMatched)}</strong><small>Across the selected shards</small></div>
+          <div className="stat-card stat-card-green"><span>Listed here</span><strong>{formatNumber(donors.length)}</strong><small>Page {page}</small></div>
           <div className="stat-card stat-card-purple"><span>City shards</span><strong>{cityCount}</strong><small>Searched shards</small></div>
           <div className="stat-card stat-card-amber"><span>Available in view</span><strong>{formatNumber(availableCount)}</strong><small>Of the listed rows</small></div>
         </div>
         <SectionCard title="Donor profiles" description="Donor records live in each city's history schema, so a profile is only visible from the shard that owns it.">
           {pageDonors.length ? <>
             <div className="table-wrap"><table className="data-table"><thead><tr><th>Donor</th><th>Blood type</th><th>City</th><th>Availability</th><th>Last donation</th><th>Age</th><th>Weight</th><th>Phone</th><th className="table-actions-head">Actions</th></tr></thead><tbody>{pageDonors.map((donor) => <tr key={donor.donorId}><td><strong>{donor.fullName}</strong></td><td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td><td>{donor.cityCode}</td><td><AvailabilityBadge available={Boolean(donor.isAvailable)} /></td><td>{formatDate(donor.lastDonationDate)}</td><td>{ageFromDate(donor.dateOfBirth) ?? "—"}</td><td>{formatNumber(donor.weightKg)} kg</td><td className="mono-text">{donor.phone || "—"}</td><td><Button variant="danger" size="sm" onClick={() => { setDeleteError(null); setPendingDelete({ id: donor.donorId, city: donor.cityCode, name: donor.fullName }); }}>Delete</Button></td></tr>)}</tbody></table></div>
-            <PaginationControls page={page} pageSize={pageSize} totalItems={donors.length} onPageChange={setPage} />
+            <PaginationControls page={page} pageSize={pageSize} totalItems={totalMatched} onPageChange={setPage} />
           </> : <EmptyState title="No donors matched">Adjust the filters, or register a donor profile from the donor sign-up page.</EmptyState>}
         </SectionCard>
       </> : null}
@@ -523,6 +524,7 @@ export function UsersPage() {
         </div>
         {users.loading ? <LoadingState label="Loading accounts" /> : null}
         {users.error ? <ErrorState error={users.error} onRetry={users.reload} /> : null}
+        {users.data?.totalApproximate ? <Notice tone="info" title="Estimated account total">The unfiltered total uses PostgreSQL row statistics so the directory can load without counting every account.</Notice> : null}
         {!users.loading && !users.error ? userRows.length ? <>
           <div className="table-wrap"><table className="data-table"><thead><tr><th>Name / username</th><th>Role</th><th>Email</th><th>Scope</th><th>Status</th><th>Created</th></tr></thead><tbody>{userRows.map((row) => {
             const donorEmailName = row.donorName
@@ -582,8 +584,8 @@ export function UsersPage() {
 export function ClusterPage() {
   const request = useRequest(() => api.system.cluster(), []);
   const cities = cityEntries(request.data?.cities);
-  const totalAvailable = cities.reduce((sum, city) => sum + Number(city.available_units || 0), 0);
-  const totalReserved = cities.reduce((sum, city) => sum + Number(city.reserved_units || 0), 0);
+  const totalAvailable = cities.reduce((sum, city) => sum + Number(city.available_units ?? 0), 0);
+  const totalReserved = cities.reduce((sum, city) => sum + Number(city.reserved_units ?? 0), 0);
   return (
     <div className="page-stack">
       <PageHeader eyebrow="System workspace" title="Cluster status" description="Per-city inventory and replication telemetry from the system control plane." actions={<Button variant="secondary" onClick={request.reload}>Refresh cluster</Button>} />
@@ -591,8 +593,8 @@ export function ClusterPage() {
       {request.loading ? <SectionCard><LoadingState label="Loading cluster status" /></SectionCard> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}
       {request.data ? <>
         <div className="stat-grid"><div className="stat-card stat-card-blue"><span>Available units</span><strong>{formatNumber(totalAvailable)}</strong><small>Across responding cities</small></div><div className="stat-card stat-card-amber"><span>Reserved units</span><strong>{formatNumber(totalReserved)}</strong><small>Live holds</small></div><div className="stat-card stat-card-purple"><span>Cities</span><strong>{cities.length}</strong><small>Configured shards</small></div><div className="stat-card stat-card-slate"><span>Instance</span><strong className="stat-instance">{request.data.instance_id || "—"}</strong><small>Last response</small></div></div>
-        <SectionCard title="City telemetry" description="All replica and failure indicators are explicitly simulated." action={<SimulatedBadge />}>
-          {cities.length ? <div className="telemetry-grid">{cities.map((city) => <article className="telemetry-card" key={city.code}><div className="telemetry-header"><div><span className="eyebrow">City shard</span><h3>{city.code}</h3></div><StatusBadge status={city.primary_up === false || city.replica_up === false ? "Attention" : "Healthy"} /></div><div className="telemetry-signal"><span>Primary</span><strong>{city.primary_up === false ? "Down" : "Up"}</strong><SimulatedBadge /></div><div className="telemetry-signal"><span>Replica</span><strong>{city.replica_up === false ? "Down" : "Up"}</strong><SimulatedBadge /></div><div className="telemetry-metrics"><div><span>Inventory</span><strong>{formatNumber(city.available_units)}</strong><small>available</small></div><div><span>Holds</span><strong>{formatNumber(city.reserved_units)}</strong><small>reserved</small></div><div><span>Measured lag</span><strong>{formatNumber(city.replica_lag_ms)} ms</strong><small>read model</small></div></div><small className="telemetry-updated">Updated {formatDateTime(city.updated_at)}</small></article>)}</div> : <EmptyState title="No cluster rows">The control plane did not return city telemetry.</EmptyState>}
+        <SectionCard title="City telemetry" description="Inventory figures are estimates from PostgreSQL statistics; replica and failure indicators are simulated." action={<SimulatedBadge />}>
+          {cities.length ? <div className="telemetry-grid">{cities.map((city) => <article className="telemetry-card" key={city.code}><div className="telemetry-header"><div><span className="eyebrow">City shard</span><h3>{city.code}</h3></div><StatusBadge status={city.reachable === false ? "Unavailable" : city.primary_up === false || city.replica_up === false ? "Attention" : "Healthy"} /></div><div className="telemetry-signal"><span>Primary</span><strong>{city.primary_up === false ? "Down" : "Up"}</strong><SimulatedBadge /></div><div className="telemetry-signal"><span>Replica</span><strong>{city.replica_up === false ? "Down" : "Up"}</strong><SimulatedBadge /></div><div className="telemetry-metrics"><div><span>Inventory</span><strong>{city.reachable === false || city.available_units == null ? "Unavailable" : `~${formatNumber(city.available_units)}`}</strong><small>available, estimated</small></div><div><span>Holds</span><strong>{city.reachable === false || city.reserved_units == null ? "Unavailable" : `~${formatNumber(city.reserved_units)}`}</strong><small>reserved, estimated</small></div><div><span>Measured lag</span><strong>{formatNumber(city.replica_lag_ms)} ms</strong><small>read model</small></div></div><small className="telemetry-updated">Updated {formatDateTime(city.updated_at)}</small></article>)}</div> : <EmptyState title="No cluster rows">The control plane did not return city telemetry.</EmptyState>}
         </SectionCard>
       </> : null}
     </div>

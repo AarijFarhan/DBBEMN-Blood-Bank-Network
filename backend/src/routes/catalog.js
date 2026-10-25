@@ -172,14 +172,24 @@ router.get(
   asyncRoute(async (req, res) => {
     const { page, limit, search, city, role } = parseQuery(adminUsersQuerySchema, req.query);
     const offset = (page - 1) * limit;
-    const values = [search || null, city ?? null, role ?? null];
-    const filter = `($1::text IS NULL
-         OR u.username ILIKE '%' || $1 || '%'
-         OR u.email ILIKE '%' || $1 || '%'
-         OR h.name ILIKE '%' || $1 || '%'
-         OR b.name ILIKE '%' || $1 || '%')
-       AND ($2::char(3) IS NULL OR COALESCE(h.city_code, b.city_code, u.donor_city_code) = $2)
-       AND ($3::text IS NULL OR u.role = $3)`;
+    const values = [];
+    const conditions = [];
+    if (search) {
+      values.push(search);
+      conditions.push(`(u.username ILIKE '%' || $${values.length} || '%'
+         OR u.email ILIKE '%' || $${values.length} || '%'
+         OR h.name ILIKE '%' || $${values.length} || '%'
+         OR b.name ILIKE '%' || $${values.length} || '%')`);
+    }
+    if (city) {
+      values.push(city);
+      conditions.push(`COALESCE(h.city_code, b.city_code, u.donor_city_code) = $${values.length}::char(3)`);
+    }
+    if (role) {
+      values.push(role);
+      conditions.push(`u.role = $${values.length}`);
+    }
+    const filter = conditions.length ? conditions.join(" AND ") : "TRUE";
     const catalog = getCatalogPool();
     const [result, count] = await Promise.all([
       catalog.query(
@@ -193,19 +203,25 @@ router.get(
          LEFT JOIN catalog.blood_banks b ON b.blood_bank_id = u.blood_bank_id
          WHERE ${filter}
          ORDER BY u.role, u.username
-         LIMIT $4 OFFSET $5`,
+         LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
         [...values, limit, offset],
       ),
-      catalog.query(
-        `SELECT count(*)::int AS total
-         FROM catalog.users u
-         LEFT JOIN catalog.hospitals h ON h.hospital_id = u.hospital_id
-         LEFT JOIN catalog.blood_banks b ON b.blood_bank_id = u.blood_bank_id
-         WHERE ${filter}`,
-        values,
-      ),
+      conditions.length
+        ? catalog.query(
+            `SELECT count(*)::int AS total
+             FROM catalog.users u
+             LEFT JOIN catalog.hospitals h ON h.hospital_id = u.hospital_id
+             LEFT JOIN catalog.blood_banks b ON b.blood_bank_id = u.blood_bank_id
+             WHERE ${filter}`,
+            values,
+          )
+        : catalog.query(
+            `SELECT GREATEST(reltuples, 0)::bigint AS total
+             FROM pg_class
+             WHERE oid = 'catalog.users'::regclass`,
+          ),
     ]);
-    const total = count.rows[0]?.total ?? 0;
+    const total = Number(count.rows[0]?.total ?? 0);
     const donorIdsByCity = new Map();
     for (const user of result.rows) {
       if (user.role !== "DONOR" || !user.donorId || !user.donorCityCode) continue;
@@ -234,7 +250,14 @@ router.get(
         ? donorNames.get(`${user.donorCityCode?.trim()}:${user.donorId}`) ?? null
         : null,
     }));
-    res.json({ users, page, limit, total, hasMore: offset + result.rows.length < total });
+    res.json({
+      users,
+      page,
+      limit,
+      total,
+      totalApproximate: conditions.length === 0,
+      hasMore: offset + result.rows.length < total,
+    });
   }),
 );
 

@@ -26,7 +26,12 @@ const sharedMode = await initShared();
 const busMode = initEventBus();
 logger.info({ sharedMode, busMode }, "shared state ready");
 
-const stopBackgroundJobs = startBackgroundJobs(logger);
+const backgroundJobsEnabled =
+  String(process.env.BACKGROUND_JOBS_ENABLED ?? "true").toLowerCase() !== "false";
+const stopBackgroundJobs = backgroundJobsEnabled ? startBackgroundJobs(logger) : () => {};
+if (!backgroundJobsEnabled) {
+  logger.info("background jobs disabled for this instance");
+}
 const server = app.listen(env.port, "0.0.0.0", () => {
   logger.info({ port: env.port, instanceId: env.instanceId }, "DBBEMN API listening");
 });

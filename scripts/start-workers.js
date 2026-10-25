@@ -17,6 +17,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const workerCount = Number(process.env.WORKER_COUNT ?? 3);
 const basePort = Number(process.env.WORKER_BASE_PORT ?? 4001);
+const backgroundJobsEnabled =
+  String(process.env.BACKGROUND_JOBS_ENABLED ?? "true").toLowerCase() !== "false";
 // Worker logs can get large during load testing, so they are written outside
 // the repository by default. Set LOG_DIR to move them (e.g. to a data volume).
 const logDir = path.resolve(process.env.LOG_DIR ?? root);
@@ -90,6 +92,7 @@ for (let index = 0; index < workerCount; index += 1) {
       INSTANCE_ID: instanceId,
       ENABLE_GATEWAY: "false",
       GATEWAY_WORKER: "true",
+      BACKGROUND_JOBS_ENABLED: index === 0 && backgroundJobsEnabled ? "true" : "false",
     },
     stdio: ["ignore", logStream, logStream],
   });
@@ -110,6 +113,7 @@ console.log(
   `[workers] ${workerCount} instances on ports ${basePort}-${basePort + workerCount - 1}. ` +
     "nginx/nginx.conf proxies to exactly these ports.",
 );
+console.log("[workers] worker-1 runs maintenance jobs; the other workers serve API traffic only.");
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {

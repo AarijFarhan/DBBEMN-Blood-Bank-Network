@@ -83,14 +83,27 @@ router.get(
                   client.query(`SELECT last_applied_event_id, last_applied_at FROM ${read}.replication_state WHERE id = TRUE`),
                   new Promise((_, reject) => setTimeout(() => reject(new Error("replication timeout")), 2000)),
                 ]),
-                Promise.race([
-                  client.query(
-                    `SELECT count(*) FILTER (WHERE status = 'AVAILABLE')::int AS available,
-                            count(*) FILTER (WHERE status IN ('RESERVED', 'DISPATCHED'))::int AS reserved
-                     FROM ${hot}.blood_units`,
-                  ),
-                  new Promise((_, reject) => setTimeout(() => reject(new Error("inventory timeout")), 5000)),
-                ]),
+                client.query(
+                  `SELECT
+                     CASE WHEN s.most_common_vals IS NULL THEN NULL
+                       ELSE round(GREATEST(c.reltuples, 0) *
+                         COALESCE((s.most_common_freqs::text::real[])[array_position(s.most_common_vals::text::text[], 'AVAILABLE')], 0))
+                     END::bigint AS available,
+                     CASE WHEN s.most_common_vals IS NULL THEN NULL
+                       ELSE round(GREATEST(c.reltuples, 0) * (
+                         COALESCE((s.most_common_freqs::text::real[])[array_position(s.most_common_vals::text::text[], 'RESERVED')], 0)
+                         + COALESCE((s.most_common_freqs::text::real[])[array_position(s.most_common_vals::text::text[], 'DISPATCHED')], 0)
+                       ))
+                     END::bigint AS reserved
+                   FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                   LEFT JOIN pg_stats s
+                     ON s.schemaname = n.nspname
+                    AND s.tablename = c.relname
+                    AND s.attname = 'status'
+                   WHERE n.nspname = $1 AND c.relname = 'blood_units'`,
+                  [hot],
+                ),
                 measureReplicaLagMs(cityCode, client).catch(() => 0),
               ]);
               status[cityCode] = {
@@ -99,8 +112,9 @@ router.get(
                 extra_lag_ms: flag?.extraLagMs ?? 0,
                 replica_lag_ms: lag,
                 last_applied_event_id: Number(replication.rows?.[0]?.last_applied_event_id ?? 0),
-                available_units: Number(inventory.rows?.[0]?.available ?? 0),
-                reserved_units: Number(inventory.rows?.[0]?.reserved ?? 0),
+                available_units: inventory.rows[0]?.available === null ? null : Number(inventory.rows[0]?.available),
+                reserved_units: inventory.rows[0]?.reserved === null ? null : Number(inventory.rows[0]?.reserved),
+                inventory_approximate: true,
                 updated_at: flag?.updatedAt,
                 simulation: "SIMULATED",
                 reachable: true,
@@ -117,6 +131,7 @@ router.get(
               last_applied_event_id: 0,
               available_units: 0,
               reserved_units: 0,
+              inventory_approximate: true,
               updated_at: flag?.updatedAt,
               simulation: "SIMULATED",
               reachable: false,

@@ -15,11 +15,11 @@ const DONATION_RULES = {
 
 const DISCARD_RULES = { reason: [maxLength(500, "Reason")] };
 
-function UnitFilters({ status, setStatus, query, setQuery }) {
+function UnitFilters({ status, setStatus, query, setQuery, resetPage }) {
   return (
     <div className="toolbar">
-      <input className="search-input" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by unit, group, or bank" aria-label="Filter inventory" />
-      <select className="compact-select" value={status} onChange={(event) => setStatus(event.target.value)}>{UNIT_STATUSES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
+      <input className="search-input" type="search" value={query} onChange={(event) => { setQuery(event.target.value); resetPage(); }} placeholder="Search unit, group, or status" aria-label="Filter inventory" />
+      <select className="compact-select" value={status} onChange={(event) => { setStatus(event.target.value); resetPage(); }}>{UNIT_STATUSES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
     </div>
   );
 }
@@ -40,12 +40,27 @@ export function BankInventoryPage() {
   const { user } = useAuth();
   const [status, setStatus] = useState("AVAILABLE");
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState(null);
   const [reason, setReason] = useState("");
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const { errors, setErrors, clearError, clearAll } = useFieldErrors();
-  const request = useRequest(() => api.units.list({ bankId: user?.bloodBankId, status: status || undefined, limit: 50 }), [status, user?.bloodBankId]);
-  const units = useMemo(() => listFrom(request.data, ["units", "items"]).map(normalizeResult).filter((unit) => !query || [unit.unitId, unit.bloodGroup, unit.rhFactor, unit.componentType, unit.status].some((value) => String(value || "").toLowerCase().includes(query.toLowerCase()))), [request.data, query]);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => window.clearTimeout(timeout);
+  }, [query]);
+  const request = useRequest(
+    () => api.units.list({
+      bankId: user?.bloodBankId,
+      status: status || undefined,
+      search: debouncedQuery || undefined,
+      page,
+      limit: 50,
+    }),
+    [status, debouncedQuery, page, user?.bloodBankId],
+  );
+  const units = useMemo(() => listFrom(request.data, ["units", "items"]).map(normalizeResult), [request.data]);
   const available = units.filter((unit) => unit.status === "AVAILABLE").length;
   const quarantine = units.filter((unit) => unit.status === "QUARANTINE").length;
   const expiring = units.filter((unit) => unit.expiryDate && new Date(unit.expiryDate).getTime() - Date.now() < 7 * 86400000).length;
@@ -77,8 +92,8 @@ export function BankInventoryPage() {
     <div className="page-stack">
       <PageHeader eyebrow="Blood bank workspace" title="Inventory control" description="See the live unit ledger for your bank, with expiry and quarantine signals first." actions={<Button variant="secondary" onClick={request.reload}>Refresh inventory</Button>} />
       {action.success ? <Notice tone="success" title="Inventory updated">{action.success}</Notice> : null}
-      <div className="stat-grid"><div className="stat-card stat-card-blue"><span>Available</span><strong>{available}</strong><small>Ready to reserve</small></div><div className="stat-card stat-card-amber"><span>Quarantine</span><strong>{quarantine}</strong><small>Awaiting screening</small></div><div className="stat-card stat-card-red"><span>Expiring soon</span><strong>{expiring}</strong><small>Within seven days</small></div></div>
-      <SectionCard title="Unit ledger" description="Search and filter the current response from your tenant-scoped shard."><UnitFilters status={status} setStatus={setStatus} query={query} setQuery={setQuery} />{request.loading ? <LoadingState label="Loading unit inventory" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? <UnitTable units={units} onDiscard={openDiscard} /> : null}</SectionCard>
+      <div className="stat-grid"><div className="stat-card stat-card-blue"><span>Available on page</span><strong>{available}</strong><small>Ready to reserve</small></div><div className="stat-card stat-card-amber"><span>Quarantine on page</span><strong>{quarantine}</strong><small>Awaiting screening</small></div><div className="stat-card stat-card-red"><span>Expiring on page</span><strong>{expiring}</strong><small>Within seven days</small></div></div>
+      <SectionCard title="Unit ledger" description="Search and page through your tenant-scoped inventory."><UnitFilters status={status} setStatus={setStatus} query={query} setQuery={setQuery} resetPage={() => setPage(1)} />{request.loading ? <LoadingState label="Loading unit inventory" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? <><UnitTable units={units} onDiscard={openDiscard} /><div className="pagination-controls"><Button variant="secondary" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1 || request.loading}>Previous</Button><span>Page {page}</span><Button variant="secondary" onClick={() => setPage((current) => current + 1)} disabled={!request.data?.hasMore || request.loading}>Next</Button></div></> : null}</SectionCard>
       <Modal open={Boolean(selected)} title="Discard unit" onClose={() => setSelected(null)} footer={<><Button variant="ghost" onClick={() => setSelected(null)}>Keep unit</Button><Button variant="danger" onClick={discard} disabled={action.loading}>{action.loading ? "Discarding…" : "Discard unit"}</Button></>}>
         {action.error ? <Notice tone="error" title="Discard failed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
         <p className="modal-copy">Discarding is restricted to available and quarantined units. The state transition is recorded by the primary shard.</p>

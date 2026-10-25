@@ -787,6 +787,8 @@ cp .env.example .env
 | `CRITICAL_HOLD_MINUTES` | `60` | Hold for `CRITICAL` urgency. |
 | `REPLICA_LAG_MS` | `750` | Simulated replica lag reported by `chaos`. |
 | `SEARCH_SHARD_TIMEOUT_MS` | `1500` | Per-shard search deadline. |
+| `STATS_SHARD_TIMEOUT_MS` | `45000` | Per-shard analytics deadline; keep below the proxy timeout. |
+| `BACKGROUND_JOBS_ENABLED` | `true` | Run scheduled expiry sweeps and replica appliers in this process. |
 
 **Cache and presence indexes** (all optional — see [§9.2](#92-caching-and-presence-indexes))
 
@@ -805,6 +807,8 @@ correctness — an undersized filter costs queries, not answers.
 (`/api/v1/health/live`), `GATEWAY_HEALTH_INTERVAL_MS` (2000),
 `GATEWAY_HEALTH_TIMEOUT_MS` (1000), `GATEWAY_REQUEST_TIMEOUT_MS` (30000),
 `GATEWAY_RESTART_DELAY_MS` (2000).
+When multiple workers are launched, only worker 1 runs maintenance and replica
+jobs; the other workers handle API requests without duplicating those database scans.
 
 **Frontend**
 
@@ -1006,6 +1010,12 @@ Stated plainly, because they bound what the system can honestly claim.
 10. **Legacy scaffolding in `lib/`.** `lib/db` is an empty Drizzle schema; `lib/api-spec`
     and `lib/api-client-react` cover only `/api/healthz` and are not imported by the
     frontend.
+11. **Cold network-wide dashboard analytics are estimates.** When no fresh exact
+    aggregate is cached, system-wide inventory and donation trends are estimated from
+    PostgreSQL planner statistics so large shards do not block the dashboard with
+    full-table scans. The dashboard labels these figures; they are for analytics only,
+    not operational or clinical decisions. Bank-scoped dashboards continue to use
+    exact aggregates.
 
 ---
 

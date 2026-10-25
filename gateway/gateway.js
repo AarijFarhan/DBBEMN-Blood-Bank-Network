@@ -16,6 +16,8 @@ function numberEnv(name, fallback, min, max) {
 
 const publicPort = numberEnv("PORT", 8080, 1, 65535);
 const workerCount = numberEnv("GATEWAY_WORKERS", 3, 1, 16);
+const backgroundJobsEnabled =
+  String(process.env.BACKGROUND_JOBS_ENABLED ?? "true").toLowerCase() !== "false";
 const workerBasePort = numberEnv(
   "GATEWAY_WORKER_BASE_PORT",
   4001,
@@ -79,6 +81,7 @@ function launchWorker(worker) {
       INSTANCE_ID: worker.instanceId,
       ENABLE_GATEWAY: "false",
       GATEWAY_WORKER: "true",
+      BACKGROUND_JOBS_ENABLED: worker.index === 0 && backgroundJobsEnabled ? "true" : "false",
     },
     stdio: "inherit",
   });

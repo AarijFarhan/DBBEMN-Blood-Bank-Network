@@ -15,9 +15,19 @@
  */
 import { Router } from "express";
 import { z } from "zod";
+import { createHash, randomUUID } from "node:crypto";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { getCatalogPool, getPoolForCity } from "../db/registry.js";
-import { cacheGet, cacheSet, inventoryVersions } from "../cache/store.js";
+import {
+  cacheDeleteIfValue,
+  cacheGet,
+  cacheMode,
+  cacheSet,
+  cacheSetIfAbsent,
+  inventoryVersions,
+  isSharedCache,
+  versionToken,
+} from "../cache/store.js";
 import { authenticate, requireRole } from "../middleware/auth.js";
 import { asyncRoute } from "../middleware/errors.js";
 import { parseQuery } from "../middleware/validate.js";
@@ -43,7 +53,8 @@ const RH_FACTORS = ["POS", "NEG"];
  */
 const SHARD_TIMEOUT_MS = (() => {
   const parsed = Number(process.env.STATS_SHARD_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 300000) : 60000;
+  // Return partial shard results before nginx's 60-second proxy timeout.
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 45000) : 45000;
 })();
 
 /** Run work on a city client whose statements are bounded by SHARD_TIMEOUT_MS. */
@@ -67,18 +78,306 @@ async function withCityStatsClient(cityCode, work) {
  *
  * Ten shards on one spinning disk cannot answer in parallel: five of them hold
  * 5M units each, so a cold overview was taking 30-45s and timing shards out.
- * Once a city has been counted its payload is reused for a minute, and a stale
- * payload is served immediately while a refresh runs in the background. That
- * keeps the dashboard fast and, more importantly, keeps showing the last known
- * numbers for a shard that is currently saturated instead of dropping it.
+ * These analytics are not used for clinical decisions, so their cache is
+ * deliberately independent of inventory versions. A stock update should not
+ * force another full-table aggregation before the dashboard can render.
  */
 const STATS_CACHE_TTL_SECONDS = 900;
 const STATS_FRESH_MS = 60_000;
+const STATS_REFRESH_LOCK_TTL_SECONDS = 300;
 const cityInflight = new Map();
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function cityCacheKey(cityCode, bankId) {
-  const versions = await inventoryVersions([cityCode]);
-  return `stats:city:v2:${cityCode}:${bankId ?? "all"}:${versions[cityCode]}`;
+function cityCacheKey(cityCode, bankId) {
+  return `stats:city:v3:${cityCode}:${bankId ?? "all"}`;
+}
+
+const INVENTORY_GROUPS = ["A", "B", "AB", "O"];
+const INVENTORY_RH_FACTORS = ["POS", "NEG"];
+const INVENTORY_COMPONENTS = ["WHOLE_BLOOD", "PRBC", "PLATELETS", "PLASMA"];
+const INVENTORY_STATUSES = [
+  "AVAILABLE",
+  "RESERVED",
+  "QUARANTINE",
+  "DISPATCHED",
+  "TRANSFUSED",
+  "EXPIRED",
+  "DISCARDED",
+];
+
+function frequencyMap(stat, categories) {
+  if (!stat?.values || !stat?.frequencies) return null;
+  const frequencies = new Map(
+    stat.values.map((value, index) => [value, Number(stat.frequencies[index] ?? 0)]),
+  );
+  const missing = categories.filter((category) => !frequencies.has(category));
+  const knownTotal = [...frequencies.values()].reduce((sum, value) => sum + value, 0);
+  const distinct = Math.abs(Number(stat.distinct ?? 0));
+  const remainder = Math.max(0, 1 - Number(stat.nullFraction ?? 0) - knownTotal);
+  const inferredFrequency =
+    missing.length > 0 && distinct > stat.values.length ? remainder / missing.length : 0;
+  return new Map(categories.map((category) => [category, frequencies.get(category) ?? inferredFrequency]));
+}
+
+function valueEpoch(value) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function histogramCdf(histogram, cutoff) {
+  if (!histogram?.length) return null;
+  const cutoffEpoch = valueEpoch(cutoff);
+  const first = valueEpoch(histogram[0]);
+  const last = valueEpoch(histogram.at(-1));
+  if (cutoffEpoch === null || first === null || last === null) return null;
+  if (cutoffEpoch < first) return 0;
+  if (cutoffEpoch >= last) return 1;
+  const intervalCount = histogram.length - 1;
+  for (let index = 0; index < intervalCount; index += 1) {
+    const start = valueEpoch(histogram[index]);
+    const end = valueEpoch(histogram[index + 1]);
+    if (start === null || end === null || cutoffEpoch > end) continue;
+    const fraction = end === start ? 0 : (cutoffEpoch - start) / (end - start);
+    return (index + fraction) / intervalCount;
+  }
+  return 1;
+}
+
+function estimatedFrequencyThrough(stat, cutoff) {
+  if (!stat?.values || !stat?.frequencies) return null;
+  const cutoffEpoch = valueEpoch(cutoff);
+  if (cutoffEpoch === null) return null;
+  const mcvFrequency = stat.values.reduce((sum, value, index) => {
+    const epoch = valueEpoch(value);
+    return epoch !== null && epoch <= cutoffEpoch ? sum + Number(stat.frequencies[index] ?? 0) : sum;
+  }, 0);
+  const mcvTotal = stat.frequencies.reduce((sum, value) => sum + Number(value ?? 0), 0);
+  const remainder = Math.max(0, 1 - Number(stat.nullFraction ?? 0) - mcvTotal);
+  const histogramFraction = histogramCdf(stat.histogram, cutoff);
+  return mcvFrequency + remainder * (histogramFraction ?? 0);
+}
+
+function estimatedRangeCount(stat, rowEstimate, lowerBound, upperBound) {
+  const throughUpper = estimatedFrequencyThrough(stat, upperBound);
+  const throughLower = estimatedFrequencyThrough(stat, lowerBound);
+  if (throughUpper === null || throughLower === null) return null;
+  return Math.max(0, Math.round(rowEstimate * (throughUpper - throughLower)));
+}
+
+function statByColumn(rows, relation, column) {
+  return rows.find((row) => row.relation === relation && row.columnName === column);
+}
+
+async function estimateCityStats(cityCode) {
+  const { hot, hist } = schemasFor(cityCode);
+  const statsResult = await getPoolForCity(cityCode).query(
+    `SELECT c.relname AS relation,
+            GREATEST(c.reltuples, 0)::double precision AS "rowEstimate",
+            s.attname AS "columnName",
+            s.n_distinct AS distinct,
+            s.null_frac AS "nullFraction",
+            s.most_common_vals::text::text[] AS values,
+            s.most_common_freqs::text::real[] AS frequencies,
+            s.histogram_bounds::text::text[] AS histogram,
+            CURRENT_DATE::text AS today,
+            (CURRENT_DATE + 7)::text AS "expiryCutoff",
+            (now() - interval '30 days')::text AS "activityCutoff",
+            now()::text AS "now"
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       LEFT JOIN pg_stats s
+         ON s.schemaname = n.nspname
+        AND s.tablename = c.relname
+        AND s.attname = ANY($3::text[])
+      WHERE (n.nspname = $1 AND c.relname IN ('blood_units', 'reservations'))
+         OR (n.nspname = $2 AND c.relname IN ('donations', 'transfusions'))`,
+    [
+      hot,
+      hist,
+      ["blood_group", "rh_factor", "component_type", "status", "urgency", "expiry_date", "collected_at", "transfused_at"],
+    ],
+  );
+  const rows = statsResult.rows;
+  const units = rows.find((row) => row.relation === "blood_units");
+  if (!units) throw new Error(`Inventory estimates unavailable for ${cityCode}.`);
+
+  const distribution = (relation, column, categories) =>
+    frequencyMap(statByColumn(rows, relation, column), categories);
+  const groups = distribution("blood_units", "blood_group", INVENTORY_GROUPS);
+  const rhFactors = distribution("blood_units", "rh_factor", INVENTORY_RH_FACTORS);
+  const components = distribution("blood_units", "component_type", INVENTORY_COMPONENTS);
+  const statuses = distribution("blood_units", "status", INVENTORY_STATUSES);
+  if (!groups || !rhFactors || !components || !statuses) {
+    throw new Error(`Inventory planner statistics are incomplete for ${cityCode}.`);
+  }
+
+  const rowEstimate = Number(units.rowEstimate);
+  const matrixRows = [];
+  const statusRows = INVENTORY_STATUSES.map((status) => ({
+    status,
+    count: Math.round(rowEstimate * statuses.get(status)),
+  }));
+  for (const bloodGroup of INVENTORY_GROUPS) {
+    for (const rhFactor of INVENTORY_RH_FACTORS) {
+      for (const componentType of INVENTORY_COMPONENTS) {
+        for (const status of INVENTORY_STATUSES) {
+          matrixRows.push({
+            bloodGroup,
+            rhFactor,
+            componentType,
+            status,
+            count: Math.round(
+              rowEstimate *
+                groups.get(bloodGroup) *
+                rhFactors.get(rhFactor) *
+                components.get(componentType) *
+                statuses.get(status),
+            ),
+          });
+        }
+      }
+    }
+  }
+
+  const reservationRelation = rows.find((row) => row.relation === "reservations");
+  const reservationStatus = statByColumn(rows, "reservations", "status");
+  const reservationUrgency = statByColumn(rows, "reservations", "urgency");
+  const reservationStatuses = reservationStatus?.values ?? [];
+  const reservationUrgencies = reservationUrgency?.values ?? [];
+  const reservationStatusFrequencies = frequencyMap(reservationStatus, reservationStatuses);
+  const reservationUrgencyFrequencies = frequencyMap(reservationUrgency, reservationUrgencies);
+  const reservationRows = reservationRelation && reservationStatusFrequencies && reservationUrgencyFrequencies
+    ? reservationStatuses.flatMap((status) =>
+        reservationUrgencies.map((urgency) => ({
+          status,
+          urgency,
+          count: Math.round(
+            Number(reservationRelation.rowEstimate) *
+              reservationStatusFrequencies.get(status) *
+              reservationUrgencyFrequencies.get(urgency),
+          ),
+        })),
+      )
+    : [];
+
+  const donationsRelation = rows.find((row) => row.relation === "donations");
+  const transfusionsRelation = rows.find((row) => row.relation === "transfusions");
+  const dateStats = statByColumn(rows, "blood_units", "expiry_date");
+  const donationDateStats = statByColumn(rows, "donations", "collected_at");
+  const transfusionDateStats = statByColumn(rows, "transfusions", "transfused_at");
+  const expiryFraction = estimatedFrequencyThrough(dateStats, units.expiryCutoff);
+  const expiredFraction = estimatedFrequencyThrough(dateStats, units.today);
+  const eligibleStatusFrequency = ["AVAILABLE", "QUARANTINE", "RESERVED"]
+    .reduce((sum, status) => sum + statuses.get(status), 0);
+
+  return {
+    cityCode,
+    approximate: true,
+    matrixRows,
+    statusRows,
+    unknownStatusRows: 0,
+    reservationRows,
+    donationsCount: donationsRelation
+      ? estimatedRangeCount(
+          donationDateStats,
+          Number(donationsRelation.rowEstimate),
+          units.activityCutoff,
+          units.now,
+        ) ?? 0
+      : 0,
+    transfusionsCount: transfusionsRelation
+      ? estimatedRangeCount(
+          transfusionDateStats,
+          Number(transfusionsRelation.rowEstimate),
+          units.activityCutoff,
+          units.now,
+        ) ?? 0
+      : 0,
+    inventoryDegraded: false,
+    expiry: {
+      expiring7d: Math.round(rowEstimate * eligibleStatusFrequency * (expiryFraction ?? 0)),
+      expired: Math.round(rowEstimate * (expiredFraction ?? 0)),
+      available: Math.round(rowEstimate * statuses.get("AVAILABLE")),
+      reserved: Math.round(rowEstimate * statuses.get("RESERVED")),
+      quarantine: Math.round(rowEstimate * statuses.get("QUARANTINE")),
+    },
+  };
+}
+
+async function estimateCityTimeseries(cityCode, days) {
+  const { hist } = schemasFor(cityCode);
+  const result = await getPoolForCity(cityCode).query(
+    `SELECT GREATEST(c.reltuples, 0)::double precision AS "rowEstimate",
+            s.n_distinct AS distinct,
+            s.null_frac AS "nullFraction",
+            s.most_common_vals::text::text[] AS values,
+            s.most_common_freqs::text::real[] AS frequencies,
+            s.histogram_bounds::text::text[] AS histogram
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       LEFT JOIN pg_stats s
+         ON s.schemaname = n.nspname
+        AND s.tablename = c.relname
+        AND s.attname = 'collected_at'
+      WHERE n.nspname = $1
+        AND c.relname = 'donations'`,
+    [hist],
+  );
+  const stats = result.rows[0];
+  if (!stats || (!stats.values && !stats.histogram)) {
+    throw new Error(`Donation planner statistics are unavailable for ${cityCode}.`);
+  }
+
+  const now = Date.now();
+  const lowerBound = now - days * 86_400_000;
+  const dailyCounts = new Map();
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    dailyCounts.set(new Date(now - offset * 86_400_000).toISOString().slice(0, 10), 0);
+  }
+  const rowEstimate = Number(stats.rowEstimate);
+  const nonNullFraction = 1 - Number(stats.nullFraction ?? 0);
+  const addToDay = (epoch, count) => {
+    const day = new Date(epoch).toISOString().slice(0, 10);
+    if (dailyCounts.has(day)) dailyCounts.set(day, dailyCounts.get(day) + count);
+  };
+
+  const mcvFrequency = (stats.frequencies ?? []).reduce((sum, frequency) => sum + Number(frequency), 0);
+  (stats.values ?? []).forEach((value, index) => {
+    const epoch = valueEpoch(value);
+    if (epoch !== null && epoch >= lowerBound && epoch <= now) {
+      addToDay(epoch, rowEstimate * nonNullFraction * Number(stats.frequencies[index] ?? 0));
+    }
+  });
+
+  const histogram = (stats.histogram ?? []).map(valueEpoch);
+  if (histogram.length > 1) {
+    const remainingFrequency = Math.max(0, 1 - mcvFrequency);
+    const intervalFrequency = remainingFrequency / (histogram.length - 1);
+    for (let index = 0; index < histogram.length - 1; index += 1) {
+      const intervalStart = histogram[index];
+      const intervalEnd = histogram[index + 1];
+      if (intervalStart === null || intervalEnd === null || intervalEnd <= intervalStart) continue;
+      const clippedStart = Math.max(intervalStart, lowerBound);
+      const clippedEnd = Math.min(intervalEnd, now);
+      if (clippedEnd <= clippedStart) continue;
+      for (const day of dailyCounts.keys()) {
+        const dayStart = Date.parse(`${day}T00:00:00.000Z`);
+        const overlap = Math.max(0, Math.min(clippedEnd, dayStart + 86_400_000) - Math.max(clippedStart, dayStart));
+        if (overlap > 0) {
+          dailyCounts.set(
+            day,
+            dailyCounts.get(day) +
+              rowEstimate * nonNullFraction * intervalFrequency * (overlap / (intervalEnd - intervalStart)),
+          );
+        }
+      }
+    }
+  }
+
+  return {
+    approximate: true,
+    rows: [...dailyCounts].map(([day, donations]) => ({ day, donations: Math.round(donations) })),
+  };
 }
 
 async function computeCityStats(cityCode, bankId) {
@@ -98,10 +397,15 @@ async function computeCityStats(cityCode, bankId) {
       matrix = await client.query(
         `SELECT blood_group::text AS "bloodGroup", rh_factor::text AS "rhFactor",
                 component_type::text AS "componentType", status::text AS status,
-                count(*)::int AS count
+                count(*)::int AS count,
+                count(*) FILTER (
+                  WHERE expiry_date <= CURRENT_DATE + 7
+                    AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED')
+                )::int AS "expiring7d",
+                count(*) FILTER (WHERE expiry_date <= CURRENT_DATE)::int AS expired
            FROM ${hot}.blood_units
            ${bankFilter}
-           GROUP BY 1, 2, 3, 4`,
+           GROUP BY blood_group, rh_factor, component_type, status`,
         bankValues,
       );
     } catch (error) {
@@ -125,15 +429,24 @@ async function computeCityStats(cityCode, bankId) {
                 count(*) FILTER (WHERE status = 'DISPATCHED')::int AS dispatched,
                 count(*) FILTER (WHERE status = 'TRANSFUSED')::int AS transfused,
                 count(*) FILTER (WHERE status = 'EXPIRED')::int AS expired,
-                count(*) FILTER (WHERE status = 'DISCARDED')::int AS discarded
+                count(*) FILTER (WHERE status = 'DISCARDED')::int AS discarded,
+                count(*) FILTER (
+                  WHERE expiry_date <= CURRENT_DATE + 7
+                    AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED')
+                )::int AS "expiring7d",
+                count(*) FILTER (WHERE expiry_date <= CURRENT_DATE)::int AS "expiredByDate"
          FROM ${hot}.blood_units${bankFilter}`,
         bankValues,
       );
       const counts = statusCounts.rows[0];
       statusRows = Object.entries(counts)
-        .filter(([status]) => status !== "total")
+        .filter(([status]) => !["total", "expiring7d", "expiredByDate"].includes(status))
         .map(([status, count]) => ({ status: status.toUpperCase(), count }));
       unknownStatusRows = Number(counts.total) - statusRows.reduce((sum, row) => sum + row.count, 0);
+      matrix.expiry = {
+        expiring7d: counts.expiring7d,
+        expired: counts.expiredByDate,
+      };
     }
     const reservations = bankId
       ? await client.query(
@@ -177,14 +490,10 @@ async function computeCityStats(cityCode, bankId) {
         );
     // Expiry pressure is computed per shard in SQL so the dashboard never
     // pulls every row over the wire just to count the urgent ones.
-    const expiry = await client.query(
-      `SELECT count(*)::int AS "expiring7d",
-              count(*) FILTER (WHERE expiry_date <= CURRENT_DATE)::int AS expired
-       FROM ${hot}.blood_units
-       WHERE expiry_date <= CURRENT_DATE + 7
-         AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED')${bankId ? " AND blood_bank_id = $1" : ""}`,
-      bankValues,
-    );
+    const expiry = matrix.expiry ?? {
+      expiring7d: matrix.rows.reduce((sum, row) => sum + row.expiring7d, 0),
+      expired: matrix.rows.reduce((sum, row) => sum + row.expired, 0),
+    };
     return {
       cityCode,
       matrixRows: matrix.rows,
@@ -195,7 +504,7 @@ async function computeCityStats(cityCode, bankId) {
       transfusionsCount: transfusions.rows[0]?.count ?? 0,
       inventoryDegraded,
       expiry: {
-        ...expiry.rows[0],
+        ...expiry,
         available: statusRows?.find((row) => row.status === "AVAILABLE")?.count
           ?? matrix.rows.reduce((sum, row) => sum + (row.status === "AVAILABLE" ? row.count : 0), 0),
         reserved: statusRows?.find((row) => row.status === "RESERVED")?.count
@@ -208,13 +517,48 @@ async function computeCityStats(cityCode, bankId) {
 }
 
 async function refreshCityStats(cityCode, bankId) {
-  const key = await cityCacheKey(cityCode, bankId);
+  const key = cityCacheKey(cityCode, bankId);
   const existing = cityInflight.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const payload = { ...(await computeCityStats(cityCode, bankId)), savedAt: Date.now() };
-    await cacheSet(key, JSON.stringify(payload), STATS_CACHE_TTL_SECONDS);
-    return payload;
+    const lockToken = randomUUID();
+    const lockKey = `${key}:refresh-lock`;
+    const usesSharedCache = cacheMode() === "redis";
+    const ownsLock = usesSharedCache
+      ? await cacheSetIfAbsent(lockKey, lockToken, STATS_REFRESH_LOCK_TTL_SECONDS)
+      : false;
+    const lockContended =
+      usesSharedCache && !ownsLock ? Boolean(await cacheGet(lockKey)) : false;
+
+    if (lockContended) {
+      for (let attempt = 0; attempt < 220; attempt += 1) {
+        await sleep(250);
+        const raw = await cacheGet(key);
+        if (raw) {
+          try {
+            const cached = JSON.parse(raw);
+            if (Array.isArray(cached.matrixRows) && Array.isArray(cached.reservationRows)) {
+              return cached;
+            }
+          } catch {
+            // A partial cache write is ignored; the lock owner can repopulate it.
+          }
+        }
+        if (attempt % 20 === 19) {
+          const lockStillExists = await cacheGet(lockKey);
+          if (!lockStillExists) break;
+        }
+      }
+      throw new Error(`Timed out waiting for the shared stats refresh for ${cityCode}.`);
+    }
+
+    try {
+      const payload = { ...(await computeCityStats(cityCode, bankId)), savedAt: Date.now() };
+      await cacheSet(key, JSON.stringify(payload), STATS_CACHE_TTL_SECONDS);
+      return payload;
+    } finally {
+      if (ownsLock) await cacheDeleteIfValue(lockKey, lockToken);
+    }
   })();
   cityInflight.set(key, promise);
   try {
@@ -225,7 +569,7 @@ async function refreshCityStats(cityCode, bankId) {
 }
 
 async function loadCityStats(cityCode, bankId) {
-  const raw = await cacheGet(await cityCacheKey(cityCode, bankId));
+  const raw = await cacheGet(cityCacheKey(cityCode, bankId));
   let cached = null;
   if (raw) {
     try {
@@ -236,11 +580,14 @@ async function loadCityStats(cityCode, bankId) {
   }
   if (cached?.savedAt && Array.isArray(cached.matrixRows) && Array.isArray(cached.reservationRows)) {
     if (Date.now() - cached.savedAt < STATS_FRESH_MS) return cached;
-    refreshCityStats(cityCode, bankId).catch((error) => {
-      log.warn({ err: error.message, cityCode }, "stats background refresh failed; serving cached city");
-    });
-    return cached;
+    if (bankId) {
+      refreshCityStats(cityCode, bankId).catch((error) => {
+        log.warn({ err: error.message, cityCode }, "stats background refresh failed; serving cached city");
+      });
+      return cached;
+    }
   }
+  if (!bankId) return estimateCityStats(cityCode);
   return refreshCityStats(cityCode, bankId);
 }
 
@@ -270,7 +617,9 @@ router.get(
       req.user.role === "SYSTEM_ADMIN"
         ? getCatalogPool().query(
             `SELECT
-               (SELECT count(*)::int FROM catalog.users) AS "userCount",
+               (SELECT GREATEST(reltuples, 0)::bigint
+                  FROM pg_class
+                 WHERE oid = 'catalog.users'::regclass) AS "userCount",
                (SELECT count(*)::int FROM catalog.hospitals WHERE is_active) AS "hospitalCount",
                (SELECT count(*)::int FROM catalog.blood_banks WHERE is_active) AS "bloodBankCount"`,
           )
@@ -289,6 +638,7 @@ router.get(
     const byCity = Object.create(null);
     const expiringByCity = Object.create(null);
     const degradedCities = [];
+    const estimatedCities = [];
     const unknownStatusRowsByCity = Object.create(null);
     const groupTotals = Object.fromEntries(
       BLOOD_GROUPS.flatMap((group) => RH_FACTORS.map((rh) => [`${group}${rh}`, 0])),
@@ -307,6 +657,7 @@ router.get(
       }
       const { matrixRows, reservationRows, donationsCount, transfusionsCount, inventoryDegraded, expiry } = outcome.value;
       const { statusRows, unknownStatusRows } = outcome.value;
+      if (outcome.value.approximate) estimatedCities.push(cityCode);
       if (inventoryDegraded) {
         degradedCities.push(cityCode);
         if (unknownStatusRows > 0) unknownStatusRowsByCity[cityCode] = unknownStatusRows;
@@ -370,6 +721,8 @@ router.get(
       partial: unavailableCities.length > 0,
       degradedCities,
       unknownStatusRowsByCity,
+      estimatedCities,
+      catalogCountsApproximate: Boolean(systemCounts),
       scope: {
         role: req.user.role,
         cities,
@@ -388,9 +741,27 @@ router.get(
     const { days } = parseQuery(timeseriesQuerySchema, req.query);
     const cities = await scopedCities(req);
     const bankId = scopedBankId(req);
+    const versions = isSharedCache() ? await inventoryVersions(cities) : null;
+    const cacheKey = versions
+      ? `stats:timeseries:v1:${createHash("sha256")
+          .update(JSON.stringify({ cities, bankId, days }))
+          .digest("base64url")}:${versionToken(versions, cities)}`
+      : null;
+    if (cacheKey) {
+      const cached = await cacheGet(cacheKey);
+      if (cached) {
+        try {
+          res.json(JSON.parse(cached));
+          return;
+        } catch {
+          req.log?.warn({ cacheKey }, "ignoring invalid cached stats timeseries payload");
+        }
+      }
+    }
 
     const settled = await Promise.allSettled(
       cities.map(async (cityCode) => {
+        if (!bankId) return estimateCityTimeseries(cityCode, days);
         const { hist } = schemasFor(cityCode);
         const result = await withCityStatsClient(cityCode, (client) =>
           client.query(
@@ -404,18 +775,20 @@ router.get(
             bankId ? [days, bankId] : [days],
           ),
         );
-        return result.rows;
+        return { approximate: false, rows: result.rows };
       }),
     );
 
     const unavailableCities = [];
+    const estimatedCities = [];
     const byDay = new Map();
     settled.forEach((outcome, index) => {
       if (outcome.status === "rejected") {
         unavailableCities.push(cities[index]);
         return;
       }
-      for (const row of outcome.value) {
+      if (outcome.value.approximate) estimatedCities.push(cities[index]);
+      for (const row of outcome.value.rows) {
         const key = row.day instanceof Date ? row.day.toISOString().slice(0, 10) : String(row.day);
         byDay.set(key, (byDay.get(key) ?? 0) + row.donations);
       }
@@ -429,13 +802,18 @@ router.get(
       points.push({ day, donations: byDay.get(day) ?? 0 });
     }
 
-    res.json({
+    const payload = {
       points,
       days,
       unavailableCities,
+      estimatedCities,
       partial: unavailableCities.length > 0,
       generatedAt: new Date().toISOString(),
-    });
+    };
+    if (cacheKey && !payload.partial) {
+      await cacheSet(cacheKey, JSON.stringify(payload), 60);
+    }
+    res.json(payload);
   }),
 );
 

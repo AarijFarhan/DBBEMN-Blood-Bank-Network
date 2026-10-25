@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { CITY_CODES, schemasFor } from "../db/shard-router.js";
 import { withSerializableRetryFor } from "../db/pool.js";
@@ -8,7 +9,14 @@ import { AppError, asyncRoute } from "../middleware/errors.js";
 import { parseQuery } from "../middleware/validate.js";
 import { getActiveBank } from "../services/catalog.js";
 import { assertCityWritable } from "../services/chaos.js";
-import { invalidateCityInventory } from "../cache/store.js";
+import {
+  cacheGet,
+  cacheSet,
+  invalidateCityInventory,
+  inventoryVersions,
+  isSharedCache,
+  versionToken,
+} from "../cache/store.js";
 import { KIND, locateAcrossCities } from "../services/presence.js";
 import { EVENT_TYPES, publish } from "../lib/bus.js";
 import { cityCodeSchema, uuidSchema } from "../utils/validators.js";
@@ -27,8 +35,9 @@ const unitsQuerySchema = z.object({
   bankId: uuidSchema.optional(),
   status: unitStatusSchema.optional(),
   city: cityCodeSchema.optional(),
+  search: z.string().trim().max(100).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
-  page: z.coerce.number().int().min(1).default(1),
+  page: z.coerce.number().int().min(1).max(1000).default(1),
 });
 const cityQuerySchema = z.object({ city: cityCodeSchema.optional() });
 
@@ -76,9 +85,57 @@ router.get(
     const cities = await accessibleCities(req, query.city);
     const offset = (query.page - 1) * query.limit;
     const fetchLimit = query.limit + 1;
+    const isBankAdmin = req.user.role === "BLOODBANK_ADMIN";
+    const cacheKey = isBankAdmin && isSharedCache()
+      ? await (async () => {
+          const versions = await inventoryVersions(cities);
+          const fingerprint = createHash("sha256")
+            .update(JSON.stringify({
+              bankId,
+              status: query.status ?? null,
+              search: query.search ?? "",
+              page: query.page,
+              limit: query.limit,
+            }))
+            .digest("base64url");
+          return `bank-units:v1:${fingerprint}:${versionToken(versions, cities)}`;
+        })()
+      : null;
+    if (cacheKey) {
+      const cached = await cacheGet(cacheKey);
+      if (cached) {
+        try {
+          res.json(JSON.parse(cached));
+          return;
+        } catch {
+          req.log?.warn({ cacheKey }, "ignoring invalid cached bank inventory payload");
+        }
+      }
+    }
     const result = await Promise.all(
       cities.map(async (cityCode) => {
         const { hot, hist } = schemasFor(cityCode);
+        const values = [];
+        const conditions = [];
+        if (bankId) {
+          values.push(bankId);
+          conditions.push(`u.blood_bank_id = $${values.length}::uuid`);
+        }
+        if (query.status) {
+          values.push(query.status);
+          conditions.push(`u.status = $${values.length}::common.unit_status_t`);
+        }
+        if (query.search) {
+          values.push(`%${query.search}%`);
+          const searchParam = `$${values.length}`;
+          conditions.push(`(
+            u.unit_id::text ILIKE ${searchParam}
+            OR u.blood_group::text ILIKE ${searchParam}
+            OR u.rh_factor::text ILIKE ${searchParam}
+            OR u.component_type::text ILIKE ${searchParam}
+            OR u.status::text ILIKE ${searchParam}
+          )`);
+        }
         const units = await getPoolForCity(cityCode).query(
           `SELECT u.unit_id AS "unitId", u.donation_id AS "donationId",
                   u.blood_bank_id AS "bloodBankId", u.blood_group AS "bloodGroup",
@@ -88,11 +145,10 @@ router.get(
                   u.updated_at AS "updatedAt", d.notes AS "donationNotes"
            FROM ${hot}.blood_units u
            JOIN ${hist}.donations d ON d.donation_id = u.donation_id
-           WHERE ($1::uuid IS NULL OR u.blood_bank_id = $1)
-             AND ($2::common.unit_status_t IS NULL OR u.status = $2)
+           ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
            ORDER BY u.expiry_date, u.unit_id
-           LIMIT $3 OFFSET $4`,
-          [bankId, query.status ?? null, fetchLimit, offset],
+           LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+          [...values, fetchLimit, offset],
         );
         return units.rows;
       }),
@@ -100,7 +156,9 @@ router.get(
     const allRows = result.flat();
     const hasMore = allRows.length > query.limit;
     const units = hasMore ? allRows.slice(0, query.limit) : allRows;
-    res.json({ units, page: query.page, limit: query.limit, hasMore });
+    const payload = { units, page: query.page, limit: query.limit, hasMore };
+    if (cacheKey) await cacheSet(cacheKey, JSON.stringify(payload), 15);
+    res.json(payload);
   }),
 );
 

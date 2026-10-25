@@ -19,6 +19,7 @@ const donorQuerySchema = z.object({
   rh: z.enum(["POS", "NEG"]).optional(),
   available: z.enum(["true", "false"]).optional(),
   search: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).max(1000).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 const availabilitySchema = z.object({ isAvailable: z.boolean() });
@@ -127,42 +128,62 @@ router.get(
     }
 
     const selectedCities = req.user.role === "SYSTEM_ADMIN" ? cities : cities.slice(0, 3);
+    const offset = (query.page - 1) * query.limit;
+    const fetchLimit = offset + query.limit + 1;
+    const hasFilters = Boolean(
+      query.bloodGroup || query.rh || query.available !== undefined || query.search,
+    );
     const results = await Promise.all(
       selectedCities.map(async (cityCode) => {
         const { hist } = schemasFor(cityCode);
-        const values = [
-          query.bloodGroup ?? null,
-          query.rh ?? null,
-          query.available === undefined ? null : query.available === "true",
-          query.search || null,
-        ];
-        const where = `WHERE ($1::common.blood_group_t IS NULL OR blood_group = $1)
-              AND ($2::common.rh_t IS NULL OR rh_factor = $2)
-              AND ($3::boolean IS NULL OR is_available = $3)
-              AND ($4::text IS NULL OR full_name ILIKE '%' || $4 || '%'
-                   OR phone ILIKE '%' || $4 || '%'
-                   OR donor_id::text ILIKE '%' || $4 || '%')`;
+        const values = [];
+        const conditions = [];
+        if (query.bloodGroup) {
+          values.push(query.bloodGroup);
+          conditions.push(`blood_group = $${values.length}::common.blood_group_t`);
+        }
+        if (query.rh) {
+          values.push(query.rh);
+          conditions.push(`rh_factor = $${values.length}::common.rh_t`);
+        }
+        if (query.available !== undefined) {
+          values.push(query.available === "true");
+          conditions.push(`is_available = $${values.length}`);
+        }
+        if (query.search) {
+          values.push(query.search);
+          conditions.push(`(full_name ILIKE '%' || $${values.length} || '%'
+                           OR phone ILIKE '%' || $${values.length} || '%'
+                           OR donor_id::text ILIKE '%' || $${values.length} || '%')`);
+        }
+        const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
         const cityPool = getPoolForCity(cityCode);
         try {
-          const [rows, counted] = await Promise.all([
-            cityPool.query(
-              `SELECT donor_id AS "donorId", full_name AS "fullName", phone,
-                      date_of_birth AS "dateOfBirth", weight_kg AS "weightKg",
-                      blood_group AS "bloodGroup", rh_factor AS "rhFactor",
-                      city_code AS "cityCode", last_donation_date AS "lastDonationDate",
-                      is_available AS "isAvailable"
-               FROM ${hist}.donors
-               ${where}
-               ORDER BY created_at DESC
-               LIMIT $5`,
-              [...values, query.limit],
-            ),
-            cityPool.query(
-              `SELECT count(*)::int AS total FROM ${hist}.donors ${where}`,
-              values,
-            ),
-          ]);
-          return { cityCode, rows: rows.rows, total: counted.rows[0].total };
+          const rowsPromise = cityPool.query(
+            `SELECT donor_id AS "donorId", full_name AS "fullName", phone,
+                    date_of_birth AS "dateOfBirth", weight_kg AS "weightKg",
+                    blood_group AS "bloodGroup", rh_factor AS "rhFactor",
+                    city_code AS "cityCode", last_donation_date AS "lastDonationDate",
+                    is_available AS "isAvailable", created_at AS "createdAt"
+             FROM ${hist}.donors
+             ${where}
+             ORDER BY created_at DESC, donor_id DESC
+             LIMIT $${values.length + 1}`,
+            [...values, fetchLimit],
+          );
+          const totalPromise = hasFilters
+            ? cityPool.query(
+                `SELECT count(*)::int AS total FROM ${hist}.donors ${where}`,
+                values,
+              )
+            : cityPool.query(
+                `SELECT GREATEST(reltuples, 0)::bigint AS total
+                 FROM pg_class
+                 WHERE oid = to_regclass($1)`,
+                [`${hist}.donors`],
+              );
+          const [rows, counted] = await Promise.all([rowsPromise, totalPromise]);
+          return { cityCode, rows: rows.rows, total: Number(counted.rows[0]?.total ?? 0) };
         } catch (error) {
           req.log?.warn({ err: error, cityCode }, "donor search shard unavailable");
           return { cityCode, rows: [], total: 0, unavailable: true };
@@ -172,11 +193,22 @@ router.get(
     const byCity = Object.fromEntries(results.map((item) => [item.cityCode, item.total]));
     const total = results.reduce((sum, item) => sum + item.total, 0);
     const unavailableCities = results.filter((item) => item.unavailable).map((item) => item.cityCode);
+    const donors = results
+      .flatMap((item) => item.rows)
+      .sort((left, right) => {
+        const timeDifference = new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+        return timeDifference || right.donorId.localeCompare(left.donorId);
+      });
+    const pageDonors = donors.slice(offset, offset + query.limit);
     res.json({
-      donors: results.flatMap((item) => item.rows),
+      donors: pageDonors,
+      page: query.page,
+      limit: query.limit,
       total,
       byCity,
-      truncated: results.some((item) => item.total > item.rows.length),
+      totalApproximate: !hasFilters,
+      truncated: total > offset + pageDonors.length,
+      hasMore: total > offset + pageDonors.length || donors.length > offset + query.limit,
       meta: unavailableCities.length
         ? { partial: true, unavailableCities }
         : { partial: false, unavailableCities: [] },

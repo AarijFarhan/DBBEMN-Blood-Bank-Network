@@ -18,7 +18,7 @@ import { api } from "../api";
 import { useRequest } from "../hooks/useRequest";
 import { useEventStream } from "../hooks/useEventStream";
 import EventFeed from "../components/EventFeed";
-import { Button, ErrorState, LoadingState, PageHeader, PartialResults, SectionCard, SimulatedBadge, StatCard } from "../components/UI";
+import { Button, ErrorState, LoadingState, Notice, PageHeader, PartialResults, SectionCard, SimulatedBadge, StatCard } from "../components/UI";
 import { formatNumber, friendlyError } from "../utils";
 
 const GROUP_ORDER = ["A+", "A−", "B+", "B−", "AB+", "AB−", "O+", "O−"];
@@ -143,6 +143,9 @@ function TrendChart({ points }) {
  */
 function DashboardBody({ overview, timeseries, feed, showUserCount = false }) {
   const cities = overview?.cities ? Object.entries(overview.cities) : [];
+  const unavailableCities = new Set(overview?.unavailableCities ?? []);
+  const estimatedCities = new Set(overview?.estimatedCities ?? []);
+  const estimatesInUse = estimatedCities.size > 0 || (timeseries?.estimatedCities?.length ?? 0) > 0;
   const totals = overview?.totals || {};
   const available = totals.unitsByStatus?.AVAILABLE ?? 0;
   const reserved = totals.unitsByStatus?.RESERVED ?? 0;
@@ -173,11 +176,16 @@ function DashboardBody({ overview, timeseries, feed, showUserCount = false }) {
         <StatCard label="Expiring in 7 days" value={formatNumber(totals.expiring7d ?? 0)} detail="Needs attention" tone="red" icon="alert" />
         <StatCard label="Donations (30d)" value={formatNumber(totals.donationsLast30Days ?? 0)} detail="Collected network-wide" tone="purple" icon="heart" />
         <StatCard label="Transfusions (30d)" value={formatNumber(totals.transfusionsLast30Days ?? 0)} detail="Completed requests" tone="slate" icon="truck" />
-        {showUserCount ? <StatCard label="Users" value={formatNumber(totals.userCount)} detail="Registered accounts" tone="blue" icon="users" /> : null}
+        {showUserCount ? <StatCard label="Users" value={formatNumber(totals.userCount)} detail={overview?.catalogCountsApproximate ? "Estimated registered accounts" : "Registered accounts"} tone="blue" icon="users" /> : null}
         {showUserCount ? <StatCard label="Hospitals" value={formatNumber(totals.hospitalCount)} detail="Active hospital records" tone="purple" icon="hospital" /> : null}
         {showUserCount ? <StatCard label="Blood banks" value={formatNumber(totals.bloodBankCount)} detail="Active blood-bank records" tone="red" icon="server" /> : null}
       </div>
 
+      {estimatesInUse ? (
+        <Notice tone="warning" title="Estimated analytics">
+          Cold system-wide results use PostgreSQL planner statistics for fast loading. Counts and trends are approximate and are for dashboard analytics only, not operational or clinical decisions.
+        </Notice>
+      ) : null}
       {overview?.partial ? (
         <PartialResults meta={{ partial: true, unavailableCities: overview.unavailableCities }} />
       ) : null}
@@ -213,11 +221,20 @@ function DashboardBody({ overview, timeseries, feed, showUserCount = false }) {
                 <article className="city-chart-card" key={code}>
                   <div className="city-chart-head">
                     <strong>{code}</strong>
-                    <span>
-                      {formatNumber(city.available ?? 0)} avail · {formatNumber(city.reserved ?? 0)} held
-                    </span>
+                    {unavailableCities.has(code) ? (
+                      <span>Stats temporarily unavailable</span>
+                    ) : (
+                      <span>
+                        {estimatedCities.has(code) ? "Estimated · " : ""}
+                        {formatNumber(city.available ?? 0)} avail · {formatNumber(city.reserved ?? 0)} held
+                      </span>
+                    )}
                   </div>
-                  <MatrixChart matrix={flattenCityMatrix(city.matrix)} stacked={false} />
+                  {unavailableCities.has(code) ? (
+                    <p className="chart-empty">This shard did not respond; zero does not mean empty.</p>
+                  ) : (
+                    <MatrixChart matrix={flattenCityMatrix(city.matrix)} stacked={false} />
+                  )}
                 </article>
               ))}
             </div>
