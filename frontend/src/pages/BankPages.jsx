@@ -4,7 +4,7 @@ import { useAuth } from "../auth";
 import { useRequest } from "../hooks/useRequest";
 import { BLOOD_GROUPS, COMPONENTS, RH_FACTORS, UNIT_STATUSES } from "../constants";
 import { Button, EmptyState, ErrorState, Field, Icon, LoadingState, Modal, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
-import { errorDetails, formatBloodType, formatComponent, formatDate, formatDateTime, formatNumber, friendlyError, listFrom, normalizeResult } from "../utils";
+import { donorDisplayName, errorDetails, formatBloodType, formatComponent, formatDate, formatDateTime, formatNumber, friendlyError, listFrom, normalizeResult } from "../utils";
 import { hasErrors, maxLength, number, oneOf, required, uuid, validate, useFieldErrors } from "../validation";
 
 const DONATION_RULES = {
@@ -170,7 +170,7 @@ export function BankDonationsPage() {
                 {form.donorId && !donorRows.some((donor) => donor.donorId === form.donorId)
                   ? <option value={form.donorId}>{form.donorId}</option>
                   : null}
-                {donorRows.map((donor) => <option key={donor.donorId} value={donor.donorId}>{donor.fullName} · {formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</option>)}
+                {donorRows.map((donor) => <option key={donor.donorId} value={donor.donorId}>{donorDisplayName(donor.fullName)} · {formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</option>)}
               </select>
             </Field>
             {donors.error ? <span className="field-hint">Donor search unavailable. Paste a donor UUID below.</span> : null}
@@ -180,7 +180,7 @@ export function BankDonationsPage() {
           </form>
         </SectionCard>
         <SectionCard title="Eligibility snapshot" description="Available donors returned by the bank-local search.">
-          {donors.loading ? <LoadingState label="Loading donor directory" /> : null}{!donors.loading && donorRows.length ? <div className="compact-list">{donorRows.slice(0, 8).map((donor) => <div className="compact-list-row" key={donor.donorId}><div><strong>{donor.fullName}</strong><span>{formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</span></div><span className="availability-dot" aria-label="Available" /></div>)}</div> : null}{!donors.loading && !donorRows.length ? <EmptyState title="No available donors">Donor eligibility and availability will appear here.</EmptyState> : null}
+          {donors.loading ? <LoadingState label="Loading donor directory" /> : null}{!donors.loading && donorRows.length ? <div className="compact-list">{donorRows.slice(0, 8).map((donor) => <div className="compact-list-row" key={donor.donorId}><div><strong>{donorDisplayName(donor.fullName)}</strong><span>{formatBloodType(donor.bloodGroup, donor.rhFactor)} · {donor.cityCode}</span></div><span className="availability-dot" aria-label="Available" /></div>)}</div> : null}{!donors.loading && !donorRows.length ? <EmptyState title="No available donors">Donor eligibility and availability will appear here.</EmptyState> : null}
         </SectionCard>
       </div>
       <SectionCard title="Recent donations" description="The latest collection records for your bank.">

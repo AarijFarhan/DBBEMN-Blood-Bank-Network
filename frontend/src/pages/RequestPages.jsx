@@ -4,7 +4,7 @@ import { useAuth } from "../auth";
 import { useRequest } from "../hooks/useRequest";
 import { BLOOD_GROUPS, CITIES, DONOR_REQUEST_STATUSES, RH_FACTORS, URGENCIES } from "../constants";
 import { Button, EmptyState, ErrorState, Field, Icon, LoadingState, Modal, Notice, PageHeader, SectionCard, StatusBadge } from "../components/UI";
-import { errorDetails, formatBloodType, formatDateTime, friendlyError, listFrom } from "../utils";
+import { donorDisplayName, errorDetails, formatBloodType, formatDateTime, friendlyError, listFrom } from "../utils";
 import { hasErrors, maxLength, number, oneOf, required, uuid, validate, useFieldErrors } from "../validation";
 
 const CALLOUT_RULES = {
@@ -140,7 +140,7 @@ export function SendDonorRequestsPage() {
         patientRef: form.patientRef || undefined,
         notes: form.notes || undefined,
       });
-      setAction({ loading: false, error: null, success: `Call-out sent to ${created.donor.fullName}. They can accept or decline from their donor portal.` });
+      setAction({ loading: false, error: null, success: `Call-out sent to ${donorDisplayName(created.donor.fullName)}. They can accept or decline from their donor portal.` });
       setCalloutOpen(false);
       requestStatuses.reload();
       requests.reload();
@@ -237,7 +237,7 @@ export function SendDonorRequestsPage() {
                         : null;
                   return (
                     <tr key={donor.donorId} className={form.donorId === donor.donorId ? "row-selected" : ""}>
-                      <td><strong>{donor.fullName}</strong></td>
+                      <td><strong>{donorDisplayName(donor.fullName)}</strong></td>
                       <td>{formatBloodType(donor.bloodGroup, donor.rhFactor)}</td>
                       <td>{donor.cityCode}</td>
                       <td><StatusBadge status={donor.isAvailable ? "AVAILABLE" : "UNAVAILABLE"} /></td>
@@ -265,7 +265,7 @@ export function SendDonorRequestsPage() {
 
       <Modal
         open={calloutOpen}
-        title={`Send call-out to ${donorRows.find((donor) => donor.donorId === form.donorId)?.fullName || "selected donor"}`}
+        title={`Send call-out to ${donorDisplayName(donorRows.find((donor) => donor.donorId === form.donorId)?.fullName) || "selected donor"}`}
         onClose={() => { if (!action.loading) setCalloutOpen(false); }}
         className="modal-wide"
         footer={
@@ -280,7 +280,7 @@ export function SendDonorRequestsPage() {
         <form id="donor-callout-form" className="stack-form" noValidate onSubmit={submit}>
           <div className="form-grid form-grid-two">
             <Field label="Selected donor" error={errors.donorId}>
-              <input readOnly value={donorRows.find((donor) => donor.donorId === form.donorId)?.fullName || form.donorId} className="mono-text" />
+              <input readOnly value={donorDisplayName(donorRows.find((donor) => donor.donorId === form.donorId)?.fullName) || form.donorId} className="mono-text" />
             </Field>
             <Field label="Donor city shard" error={errors.cityCode}>
               <input readOnly value={form.cityCode} className="mono-text" />
@@ -346,7 +346,7 @@ export function SendDonorRequestsPage() {
                   <tbody>
                     {requestRows.map((request) => (
                       <tr key={request.requestId}>
-                        <td><strong>{request.donorName}</strong><small className="cell-sub">{requesterLabel(request)}</small></td>
+                        <td><strong>{donorDisplayName(request.donorName)}</strong><small className="cell-sub">{requesterLabel(request)}</small></td>
                         <td>{formatBloodType(request.requiredBloodGroup, request.requiredRh)} × {request.slotsRequested}</td>
                         <td>{formatBloodType(request.donorBloodGroup, request.donorRhFactor)}</td>
                         <td><UrgencyBadge urgency={request.urgency} /></td>

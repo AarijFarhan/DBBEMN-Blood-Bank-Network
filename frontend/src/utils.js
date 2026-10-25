@@ -61,6 +61,12 @@ export function displayUserName(user) {
   return user?.username || user?.email || "Workspace user";
 }
 
+export function donorDisplayName(name) {
+  return typeof name === "string"
+    ? name.replace(/^\[SYNTHETIC\]\s*GardenBB donor\s+\d+\s*-\s*/i, "")
+    : "";
+}
+
 export function toNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
