@@ -165,7 +165,14 @@ router.get(
   "/health/ready",
   asyncRoute(async (_req, res) => {
     const cities = {};
+    const { getCatalogReplicaPool } = await import("../db/registry.js");
     const catalog = await probeNode(getCatalogPool(), false, null);
+    const catalogReplicaPool = getCatalogReplicaPool?.() ?? null;
+    const catalogReplica = catalogReplicaPool
+      ? catalog.status === "up"
+        ? await probeNode(catalogReplicaPool, true, catalog.current_wal_lsn ?? null, catalog.database_name)
+        : { status: "not_checked", configured: true, role: null }
+      : { status: "not_configured", configured: false, role: null };
     await Promise.all(CITY_CODES.map(async (cityCode) => {
       const primary = await probeNode(getPoolForCity(cityCode), false, null);
       const { current_wal_lsn: primaryWalLsn, ...primaryTelemetry } = primary;
@@ -196,7 +203,7 @@ router.get(
       status,
       instance_id: reqInstanceId(_req),
       topology: describeTopology(),
-      catalog,
+      catalog: { ...catalog, replica: catalogReplica },
       cities,
       unavailableCities,
       unavailableNodes,
@@ -232,7 +239,28 @@ router.get(
   authenticate,
   requireRole("SYSTEM_ADMIN"),
   asyncRoute(async (_req, res) => {
+    const { getCatalogReplicaPool } = await import("../db/registry.js");
     const status = {};
+    const catalogPrimary = await probeNode(getCatalogPool(), false, null);
+    const catalogReplicaPool = getCatalogReplicaPool?.() ?? null;
+    const catalogReplica = catalogReplicaPool
+      ? catalogPrimary.status === "up"
+        ? await probeNode(catalogReplicaPool, true, catalogPrimary.current_wal_lsn ?? null, catalogPrimary.database_name)
+        : { status: "not_checked", configured: true, role: null }
+      : { status: "not_configured", configured: false, role: null };
+    status.CATALOG = {
+      primary: (() => {
+        const { current_wal_lsn, ...rest } = catalogPrimary;
+        return rest;
+      })(),
+      replica: catalogReplica,
+      available_units: null,
+      reserved_units: null,
+      inventory_approximate: true,
+      inventory_error: null,
+      reachable: catalogPrimary.status === "up",
+      updated_at: new Date().toISOString(),
+    };
     await Promise.all(CITY_CODES.map(async (cityCode) => {
       const primary = await probeNode(getPoolForCity(cityCode), false, null);
       const { current_wal_lsn: primaryWalLsn, ...primaryTelemetry } = primary;

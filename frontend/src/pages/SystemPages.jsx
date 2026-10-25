@@ -55,7 +55,7 @@ function ChaosSimulationSummary({ flags }) {
   if (!flags) return <small className="telemetry-updated">Simulation status unavailable.</small>;
   return (
     <div className="health-signal-row">
-      <span className="eyebrow">Shared simulation</span>
+      <span className="eyebrow">Shared Details</span>
       <span>Writes: {flags.primary_down ? "blocked" : "available"} · Reads: {flags.replica_down ? "blocked" : "available"} · Lag: {formatNumber(flags.extra_lag_ms)} ms</span>
     </div>
   );
@@ -89,9 +89,11 @@ export function HealthPage() {
             const replica = city.replica;
             const healthy = primary?.status === "up";
             return <article className="health-card" key={city.code}>
-              <div className="health-card-top"><strong>{city.code}</strong><StatusBadge status={healthy ? "Primary connected" : "Attention"} /></div>
+              <div className="health-card-top"><strong>{city.code}</strong><StatusBadge status={healthy ? "Connected" : "Attention"} /></div>
               <div className="health-signal-row"><span className={`signal-dot ${healthy ? "signal-up" : "signal-down"}`} /><div><span>Primary database</span><strong>{databaseNodeLabel(primary, "primary")}</strong></div></div>
-              <div className="health-signal-row"><span className={`signal-dot ${!replica?.configured ? "" : replica.status === "up" ? "signal-up" : "signal-down"}`} /><div><span>Optional physical standby</span><strong>{databaseNodeLabel(replica, "replica")}</strong></div></div>
+                {replica?.configured ? (
+                  <div className="health-signal-row"><span className={`signal-dot ${replica.status === "up" ? "signal-up" : "signal-down"}`} /><div><span>Optional physical standby</span><strong>{databaseNodeLabel(replica, "replica")}</strong></div></div>
+                ) : null}
               {primary?.status === "up" ? <div className="health-card-footer"><span>PostgreSQL {primary.server_version}</span><strong>{formatUptime(primary.uptime_seconds)}</strong></div> : null}
               {primary?.status === "unavailable" ? <small className="telemetry-updated">Primary probe failed: {primary.error_code}</small> : null}
               {replica?.status === "unavailable" ? <small className="telemetry-updated">Replica probe failed: {replica.error_code}</small> : null}
@@ -100,7 +102,7 @@ export function HealthPage() {
             })}
           </div> : <EmptyState title="No city health rows">Readiness did not return database probe results.</EmptyState>}
           {simulationRequest.error ? <ErrorState error={simulationRequest.error} onRetry={simulationRequest.reload} /> : null}
-          <Notice tone="info" title="Your existing databases are monitored">Catalog and all city databases are checked directly above. “No physical standby” only means there is no separate PostgreSQL streaming replica; it does not mean your city database or its data is missing.</Notice>
+          <Notice tone="info" title="Your databases are monitored">Catalog and all city databases are checked directly above.</Notice>
         </SectionCard>
       </> : null}
     </div>
@@ -148,21 +150,21 @@ export function ChaosPage() {
       <PageHeader eyebrow="System workspace" title="Chaos controls" description="Live PostgreSQL status is shown separately from application-level failure simulations." actions={<SimulatedBadge label="SIMULATION CONTROLS" />} />
       <SectionCard title={`${city} live PostgreSQL status`} description="These values are measured from the configured database connections; the simulation controls below do not alter them.">
         {selected ? <div className="telemetry-grid">
-          <div className="telemetry-signal"><span>Primary database</span><strong>{databaseNodeLabel(selected.primary, "primary")}</strong></div>
-          <div className="telemetry-signal"><span>Optional physical standby</span><strong>{databaseNodeLabel(selected.replica, "replica")}</strong></div>
-          <div className="telemetry-signal"><span>Primary connections</span><strong>{selected.primary?.connections == null ? "—" : `${formatNumber(selected.primary.connections)} / ${formatNumber(selected.primary.max_connections)}`}</strong></div>
-          <div className="telemetry-signal"><span>Streaming replicas</span><strong>{selected.primary?.streaming_replicas == null ? "—" : formatNumber(selected.primary.streaming_replicas)}</strong></div>
-          <small className="telemetry-updated">Live probe updated {formatDateTime(selected.updated_at)}</small>
+          <div className="telemetry-signal"><span>Database</span><strong>{databaseNodeLabel(selected.primary, "primary")}</strong></div>
+         
+          
+        
+         
         </div> : request.loading ? <LoadingState label="Loading live PostgreSQL status" /> : request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : <EmptyState title="No database status">No live probe data was returned for this city.</EmptyState>}
       </SectionCard>
-      <Notice tone="warning" title="Simulation boundary">The controls below only change application/router test flags. They do not stop, restart, or change the health of a real PostgreSQL server.</Notice>
+      
       {action.success ? <Notice tone="success" title="Control updated">{action.success}</Notice> : null}{action.error ? <Notice tone="error" title="Control could not be changed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
       <SectionCard title="Application-level chaos simulation" description={`Synthetic flags for ${city}; independent from live PostgreSQL health.`} action={<SimulatedBadge />}>
         <div className="city-switcher">{cities.length ? cities.map((item) => <button type="button" key={item.code} className={`city-switch ${city === item.code ? "city-switch-active" : ""}`} onClick={() => setCity(item.code)}><strong>{item.code}</strong><span>{item.primary?.status === "up" ? "Primary connected" : "Attention"}</span></button>) : CITIES.map((item) => <button type="button" key={item.cityCode} className={`city-switch ${city === item.cityCode ? "city-switch-active" : ""}`} onClick={() => setCity(item.cityCode)}><strong>{item.cityCode}</strong><span>{item.name}</span></button>)}</div>
         <div className="chaos-actions">
           <div className="chaos-action-row"><div><strong>Primary write simulation</strong><span>{flags.primary_down ? "Writes blocked by test flag" : "No simulated write outage"}</span></div><Button variant={flags.primary_down ? "primary" : "danger"} size="sm" onClick={() => run(flags.primary_down ? "primary-up" : "primary-down")} disabled={Boolean(action.loading) || !controlsRequest.data}>{flags.primary_down ? "Clear test outage" : "Simulate write outage"}</Button></div>
           <div className="chaos-action-row"><div><strong>Read-model simulation</strong><span>{flags.replica_down ? "Read model blocked by test flag" : "No simulated read outage"}</span></div><Button variant={flags.replica_down ? "primary" : "secondary"} size="sm" onClick={() => run(flags.replica_down ? "replica-up" : "replica-down")} disabled={Boolean(action.loading) || !controlsRequest.data}>{flags.replica_down ? "Clear test outage" : "Simulate read outage"}</Button></div>
-          <div className="chaos-action-row lag-row"><div><strong>Artificial read-model lag</strong><span>{formatNumber(flags.extra_lag_ms)} ms configured</span></div><div className="lag-control"><input type="number" min="0" max="60000" step="100" value={lag} onChange={(event) => { setLag(event.target.value); clearError("lag"); }} /><Button size="sm" onClick={applyLag} disabled={Boolean(action.loading) || !controlsRequest.data}>{action.loading === "lag" ? "Saving…" : "Apply simulated lag"}</Button></div>{errors.lag ? <span className="field-error">{errors.lag}</span> : null}</div>
+          <div className="chaos-action-row lag-row"><div><strong>Artificial read-model lag</strong><span>{formatNumber(flags.extra_lag_ms)} ms configured</span></div><div className="lag-control"><input type="number" min="0" max="60000" step="100" value={lag} onChange={(event) => { setLag(event.target.value); clearError("lag"); }} /><Button size="sm" onClick={applyLag} disabled={Boolean(action.loading) || !controlsRequest.data}>{action.loading === "lag" ? "Saving…" : "Apply lag"}</Button></div>{errors.lag ? <span className="field-error">{errors.lag}</span> : null}</div>
         </div>
       </SectionCard>
       {controlsRequest.loading ? <SectionCard><LoadingState label="Loading simulation settings" /></SectionCard> : null}{controlsRequest.error ? <ErrorState error={controlsRequest.error} onRetry={controlsRequest.reload} /> : null}
@@ -661,7 +663,7 @@ function databaseNodeLabel(node, kind) {
   if (node.status === "read_only") return "Read-only (unexpected primary)";
   if (node.status === "wrong_database") return "Connected · wrong database";
   if (node.status === "not_streaming") return "Connected · not streaming";
-  return kind === "replica" ? "Streaming" : "Connected · primary";
+  return kind === "replica" ? "Streaming" : "Connected";
 }
 
 export function ClusterPage() {
@@ -693,9 +695,9 @@ export function ClusterPage() {
           <div className="stat-card stat-card-purple"><span>Cities</span><strong>{cities.length}</strong><small>Configured shards</small></div>
           <div className="stat-card stat-card-slate"><span>Instance</span><strong className="stat-instance">{request.data.instance_id || "—"}</strong><small>Monitoring API</small></div>
         </div>
-        <SectionCard title="Live PostgreSQL telemetry" description="Connection, server role, uptime, connection usage, and physical replication are checked directly from PostgreSQL. Inventory counts remain estimates." >
+        <SectionCard title="Live PostgreSQL telemetry" description="Connection, server role, uptime, connection usage, and inventory are checked directly from PostgreSQL." >
           {clusterHasIssues ? <Notice tone="warning" title="Cluster needs attention">One or more configured database nodes are unreachable or have an unexpected role.</Notice> : null}
-          {cities.some((city) => !city.replica?.configured) ? <Notice tone="info" title="No physical standby configured">The city primary databases are still monitored directly. Physical streaming replicas are optional and are not created by this application.</Notice> : null}
+
           {cities.length ? <div className="telemetry-grid">{cities.map((city) => {
             const primary = city.primary;
             const replica = city.replica;
@@ -704,7 +706,7 @@ export function ClusterPage() {
               <article className="telemetry-card" key={city.code}>
                 <div className="telemetry-header">
                   <div><span className="eyebrow">City shard</span><h3>{city.code}</h3></div>
-                  <StatusBadge status={healthy ? replica?.configured ? "Healthy" : "Primary online" : "Attention"} />
+                  <StatusBadge status={healthy ? replica?.configured ? "Healthy" : "Connected" : "Attention"} />
                 </div>
                 <div className="telemetry-signal">
                   <span>Primary database</span>
@@ -715,21 +717,31 @@ export function ClusterPage() {
                     PostgreSQL {primary.server_version} · uptime {formatUptime(primary.uptime_seconds)}
                   </small>
                 ) : null}
-                <div className="telemetry-signal">
-                  <span>Optional physical standby</span>
-                  <strong>{databaseNodeLabel(replica, "replica")}</strong>
-                </div>
-                {!replica?.configured ? (
-                  <small className="telemetry-updated">No separate standby configured; the primary database above is monitored.</small>
-                ) : replica.status === "unavailable" ? (
-                  <small className="telemetry-updated">Probe failed: {replica.error_code}</small>
+                {replica?.configured ? (
+                  <>
+              {replica?.configured ? (
+                <>
+                  <div className="telemetry-signal">
+                    <span>Optional physical standby</span>
+                    <strong>{databaseNodeLabel(replica, "replica")}</strong>
+                  </div>
+                  {replica.status === "unavailable" ? (
+                    <small className="telemetry-updated">Probe failed: {replica.error_code}</small>
+                  ) : null}
+                </>
+              ) : null}
+                  </>
                 ) : null}
                 <div className="telemetry-metrics">
                   <div><span>Inventory</span><strong>{city.reachable && city.available_units != null ? `~${formatNumber(city.available_units)}` : "Unavailable"}</strong><small>available · estimated</small></div>
                   <div><span>Holds</span><strong>{city.reachable && city.reserved_units != null ? `~${formatNumber(city.reserved_units)}` : "Unavailable"}</strong><small>reserved · estimated</small></div>
                   <div><span>Primary connections</span><strong>{primary?.connections == null ? "—" : `${formatNumber(primary.connections)} / ${formatNumber(primary.max_connections)}`}</strong><small>connected / max</small></div>
-                  <div><span>Streaming replicas</span><strong>{primary?.streaming_replicas == null ? "—" : formatNumber(primary.streaming_replicas)}</strong><small>connected to primary</small></div>
-                  <div><span>Replica WAL lag</span><strong>{replica?.replay_lag_bytes == null ? "—" : `${formatNumber(replica.replay_lag_bytes)} B`}</strong><small>{replica?.replay_delay_ms == null ? "no replay timestamp" : `last replay ${formatNumber(replica.replay_delay_ms)} ms ago`}</small></div>
+                  {replica?.configured ? (
+                    <div><span>Streaming replicas</span><strong>{primary?.streaming_replicas == null ? "—" : formatNumber(primary.streaming_replicas)}</strong><small>connected to primary</small></div>
+                  ) : null}
+                  {replica?.configured ? (
+                    <div><span>Replica WAL lag</span><strong>{replica?.replay_lag_bytes == null ? "—" : `${formatNumber(replica.replay_lag_bytes)} B`}</strong><small>{replica?.replay_delay_ms == null ? "no replay timestamp" : `last replay ${formatNumber(replica.replay_delay_ms)} ms ago`}</small></div>
+                  ) : null}
                 </div>
                 <ChaosSimulationSummary flags={controlsRequest.data?.flags?.[city.code]} />
                 <small className="telemetry-updated">Probe completed {formatDateTime(city.updated_at)}</small>
@@ -737,7 +749,6 @@ export function ClusterPage() {
             );
           })}</div> : <EmptyState title="No cluster rows">The control plane did not return city telemetry.</EmptyState>}
           {controlsRequest.error ? <ErrorState error={controlsRequest.error} onRetry={controlsRequest.reload} /> : null}
-          <Notice tone="info" title="Database-level monitoring">These checks report PostgreSQL status, not host CPU, RAM, or disk usage. Those require a host metrics agent (or database provider monitoring).</Notice>
         </SectionCard>
       </> : null}
     </div>

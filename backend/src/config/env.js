@@ -90,6 +90,7 @@ export const env = Object.freeze({
       ]),
     ),
   ),
+  catalogReplicaDatabaseUrl: process.env.CATALOG_REPLICA_DATABASE_URL || null,
   cityReplicaDatabaseUrls: Object.freeze(
     Object.fromEntries(
       CITY_CODES.map((cityCode) => [

@@ -191,6 +191,127 @@ services:
       - ./init-scripts/20-city.sh:/docker-entrypoint-initdb.d/20-city.sh:ro
       - ./db/migrations:/migrations:ro
 
+  db-catalog-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-catalog-replica
+    ports:
+      - "${CATALOG_REPLICA_PORT:-5546}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - catalog-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-khi-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-khi-replica
+    ports:
+      - "${KHI_REPLICA_PORT:-5553}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - khi-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-lhe-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-lhe-replica
+    ports:
+      - "${LHE_REPLICA_PORT:-5554}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - lhe-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-isb-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-isb-replica
+    ports:
+      - "${ISB_REPLICA_PORT:-5555}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - isb-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-rwp-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-rwp-replica
+    ports:
+      - "${RWP_REPLICA_PORT:-5557}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - rwp-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-fsd-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-fsd-replica
+    ports:
+      - "${FSD_REPLICA_PORT:-5558}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - fsd-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-mul-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-mul-replica
+    ports:
+      - "${MUL_REPLICA_PORT:-5559}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - mul-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-pew-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-pew-replica
+    ports:
+      - "${PEW_REPLICA_PORT:-5560}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - pew-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-que-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-que-replica
+    ports:
+      - "${QUE_REPLICA_PORT:-5561}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - que-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-hyd-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-hyd-replica
+    ports:
+      - "${HYD_REPLICA_PORT:-5562}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - hyd-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
+  db-guj-replica:
+    <<: *pg-common
+    container_name: dbbemn-db-guj-replica
+    ports:
+      - "${GUJ_REPLICA_PORT:-5563}:5432"
+    environment:
+      <<: *pg-env
+    volumes:
+      - guj-replica-data:/var/lib/postgresql/data
+      - ./init-scripts/00-common.sql:/docker-entrypoint-initdb.d/00-common.sql:ro
+
   nginx:
     image: nginx:alpine
     container_name: dbbemn-nginx
@@ -205,13 +326,24 @@ services:
 
 volumes:
   catalog-data:
+  catalog-replica-data:
   khi-data:
+  khi-replica-data:
   lhe-data:
+  lhe-replica-data:
   isb-data:
+  isb-replica-data:
   rwp-data:
+  rwp-replica-data:
   fsd-data:
+  fsd-replica-data:
   mul-data:
+  mul-replica-data:
   pew-data:
+  pew-replica-data:
   que-data:
+  que-replica-data:
   hyd-data:
+  hyd-replica-data:
   guj-data:
+  guj-replica-data:

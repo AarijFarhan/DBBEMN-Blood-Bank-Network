@@ -52,9 +52,17 @@ const cityReplicaPools = Object.freeze(
 const catalogPool =
   singlePool ?? createPool(env.catalogDatabaseUrl, { label: "catalog", max: env.db.poolMaxCatalog });
 
+const catalogReplicaPool =
+  singlePool ?? (env.catalogReplicaDatabaseUrl ? createPool(env.catalogReplicaDatabaseUrl, { label: "catalog-replica", max: 1 }) : null);
+
 /** Pool owning the `catalog` and `common` schemas. */
 export function getCatalogPool() {
   return catalogPool;
+}
+
+/** Optional physical PostgreSQL standby pool for the catalog node. */
+export function getCatalogReplicaPool() {
+  return catalogReplicaPool;
 }
 
 /**
@@ -92,9 +100,16 @@ export function allCityPools() {
 
 /** Configured physical PostgreSQL standby pools. */
 export function allCityReplicaPools() {
-  return CITY_CODES
-    .map((cityCode) => ({ cityCode, pool: cityReplicaPools[cityCode] }))
-    .filter(({ pool }) => pool !== null);
+  const pools = [];
+  if (catalogReplicaPool) {
+    pools.push({ cityCode: "CATALOG", pool: catalogReplicaPool });
+  }
+  pools.push(
+    ...CITY_CODES
+      .map((cityCode) => ({ cityCode, pool: cityReplicaPools[cityCode] }))
+      .filter(({ pool }) => pool !== null),
+  );
+  return pools;
 }
 
 /**
