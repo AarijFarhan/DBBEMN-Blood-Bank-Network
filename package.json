@@ -24,6 +24,8 @@
     "seed:small:isolated": "node --env-file-if-exists=.env ./scripts/run-db-command.js seed.js t_",
     "seed:small:phase3": "node --env-file-if-exists=.env ./scripts/run-db-command.js seed.js p3_",
     "seed:gardenbb:samples": "node --env-file-if-exists=.env ./scripts/seed-gardenbb-samples.js",
+    "seed:gardenbb:donors": "node --env-file-if-exists=.env ./scripts/seed-gardenbb-donors.js",
+    "seed:gardenbb:quarantine": "node --env-file-if-exists=.env ./scripts/seed-gardenbb-quarantine-units.js",
     "verify:invariants": "node --env-file-if-exists=.env ./scripts/verify-invariants.js",
     "verify:invariants:isolated": "node --env-file-if-exists=.env ./scripts/run-db-command.js verify-invariants.js t_",
     "verify:phase1": "node --env-file-if-exists=.env ./scripts/verify-phase1.js",

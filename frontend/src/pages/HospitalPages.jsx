@@ -71,7 +71,7 @@ export function HospitalSearchPage() {
         compatibleWith: `${form.patientBloodGroup}${form.patientRh === "POS" ? "+" : "-"}`,
         fromHospitalId: hospitalId,
         limit: 50,
-        sortBy: "expiryDate",
+        sortBy: "distance",
         order: "asc",
       });
       setState({ loading: false, error: null, data });
@@ -130,7 +130,7 @@ export function HospitalSearchPage() {
       {action.success ? <Notice tone="success" title="Reservation confirmed">{action.success}</Notice> : null}
       {action.error ? <Notice tone="error" title="Reservation could not be completed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}
       <div className="workspace-grid workspace-grid-wide">
-        <SectionCard title="Emergency request" description="Use a unique request for each new allocation attempt.">
+        <SectionCard title="Emergency request" description="Search all city shards for compatible units, ranked by distance from your hospital.">
           <form className="stack-form" noValidate onSubmit={search}>
             <div className="form-grid form-grid-two">
               <Field label="Patient ABO group" error={errors.patientBloodGroup}><select value={form.patientBloodGroup} onChange={(event) => update("patientBloodGroup", event.target.value)}>{BLOOD_GROUPS.map((value) => <option key={value}>{value}</option>)}</select></Field>
@@ -142,17 +142,17 @@ export function HospitalSearchPage() {
             </div>
             <div className="form-grid form-grid-two">
               <Field label="Units needed" error={errors.unitsNeeded}><input type="number" min="1" max="10" value={form.unitsNeeded} onChange={(event) => update("unitsNeeded", event.target.value)} /></Field>
-              <Field label="Search scope" error={errors.searchScope}><select value={form.searchScope} onChange={(event) => update("searchScope", event.target.value)}><option value="ALL_CITIES">All cities · ranked</option><option value="LOCAL_FIRST">Local city first</option></select></Field>
+              <Field label="Auto-reserve scope" error={errors.searchScope}><select value={form.searchScope} onChange={(event) => update("searchScope", event.target.value)}><option value="ALL_CITIES">All cities · ranked</option><option value="LOCAL_FIRST">Local city first</option></select></Field>
             </div>
-            <label className="checkbox-field checkbox-field-inline"><input type="checkbox" checked={form.allowPartial} onChange={(event) => update("allowPartial", event.target.checked)} /><span><strong>Allow partial fulfillment</strong><small>Keep available matches if one or more city shards cannot satisfy the full request.</small></span></label>
+            <label className="checkbox-field checkbox-field-inline"><input type="checkbox" checked={form.allowPartial} onChange={(event) => update("allowPartial", event.target.checked)} /><span><strong>Allow partial auto-reservation</strong><small>Keep reserved units if the full requested quantity cannot be allocated.</small></span></label>
             <Button type="submit" disabled={state.loading}>{state.loading ? "Searching network…" : "Search available units"}</Button>
           </form>
         </SectionCard>
-        <SectionCard title="Reserve from results" description="Reserve the ranked results directly, or use the request settings to auto-allocate.">
+        <SectionCard title="Reserve from results" description="Reserve an individual search result, or auto-allocate using the quantity and scope above.">
           <div className="reserve-action-panel">
             <div className="reserve-summary"><span className="summary-orb">{formatBloodType(form.patientBloodGroup, form.patientRh)}</span><div><strong>{formatComponent(form.component)}</strong><span>{form.unitsNeeded} unit{Number(form.unitsNeeded) === 1 ? "" : "s"} · {form.urgency.toLowerCase()}</span></div></div>
             <Button onClick={reserveUnits} disabled={Boolean(action.id)}>{action.id === "auto" ? "Reserving…" : "Auto-reserve request"}</Button>
-            <p className="fine-print">Auto-reserve sends a new idempotency key each time. A retry after a network interruption should reuse the original request ID.</p>
+            <p className="fine-print">Each new allocation gets a unique request ID. A retry after a network interruption should reuse the original request ID.</p>
           </div>
         </SectionCard>
       </div>

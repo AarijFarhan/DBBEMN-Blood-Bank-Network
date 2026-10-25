@@ -1,7 +1,8 @@
 # DBBEMN — Distributed Blood Bank & Emergency Matching Network
 
 A real-time, multi-city distributed platform for emergency blood-unit matching across
-Pakistan (Karachi, Lahore, Islamabad), built on horizontally fragmented PostgreSQL.
+Pakistan, built on horizontally fragmented PostgreSQL. The current topology has one
+catalog node and ten city shards.
 
 The system is engineered around one hard requirement: **a blood unit can never be
 reserved twice.** Everything else — the read model, the saga runner, the search
@@ -77,38 +78,33 @@ integration, and real inter-institution data sharing.
                             │  Render  (API host)  │
                             │  Express 5 · Node.js │
                             │  ┌────────────────┐  │
-                            │  │ Node Gateway   │  │  N workers, active health
-                            │  │ (optional)     │  │  checks, auto-restart
+                            │  │ Nginx or Node   │  │  load balances API workers
+                            │  │ gateway         │  │
                             │  └───────┬────────┘  │
                             └──────────┼───────────┘
                                        │
-              ┌────────────────────────┼────────────────────────┐
-              │                        │                        │
-              ▼                        ▼                        ▼
-   ┌────────────────────┐   ┌────────────────────┐   ┌────────────────────┐
-   │  CATALOG NODE      │   │   KHI SHARD        │   │   LHE / ISB SHARD  │
-   │  Neon PostgreSQL   │   │   Neon PostgreSQL  │   │   Neon PostgreSQL  │
-   │                    │   │                    │   │                    │
-   │  catalog.users     │   │  khi_history.*     │   │  *_history.*       │
-   │  catalog.cities    │   │  khi_hot.*         │   │  *_hot.*           │
-   │  catalog.hospitals │   │  khi_read.*        │   │  *_read.*          │
-   │  catalog.blood_    │   │                    │   │                    │
-   │        banks       │   │                    │   │                    │
-   │  catalog.refresh_  │   │                    │   │                    │
-   │        tokens      │   │                    │   │                    │
-   └────────────────────┘   └────────────────────┘   └────────────────────┘
-              │                        │                        │
-              └────────────────────────┴────────────────────────┘
+                                       │
+                 ┌─────────────────────┴─────────────────────┐
+                 ▼                                           ▼
+      ┌────────────────────┐                    ┌────────────────────────┐
+      │ CATALOG NODE       │                    │ TEN CITY SHARDS        │
+      │ PostgreSQL         │                    │ PostgreSQL, one per    │
+      │ catalog.users      │                    │ CITY_CODES entry       │
+      │ catalog.cities     │                    │ *_hot / *_history /    │
+      │ hospitals, banks,  │                    │ *_read schemas         │
+      │ refresh tokens     │                    └────────────────────────┘
+      └────────────────────┘                                │
+                 │                                          │
+                 └──────────────────┬───────────────────────┘
                                     │
                      common.* (enums + compatibility function)
-                     deployed to EVERY node — required for
-                     city shard DDL to compile at all
+                     deployed to EVERY node
 ```
 
 ### 2.2 Why the catalog is not a shard
 
 `catalog.users` is on the authentication hot path: every authenticated request reads it.
-Copying it to each city node would create three sources of truth for credentials. The
+Copying it to each city node would create multiple sources of truth for credentials. The
 invariant enforced by `scripts/migrate.js` is therefore asymmetric:
 
 - the `common` half of `001_common_catalog.sql` is applied to **every** node, because
@@ -163,7 +159,7 @@ An emergency caller gets a partial answer instantly instead of no answer.
 | Component | Choice | Notes |
 |---|---|---|
 | Framework | React 19.1.0 | Plain JavaScript + JSX. No TypeScript. |
-| Build tool | Vite 7.3.2 | Dev proxy for `/api/v1` → local gateway on `localhost:80` |
+| Build tool | Vite 7.3.2 | Dev proxy for `/api/v1` → `VITE_API_PROXY_TARGET` (defaults to `http://127.0.0.1`, Nginx on port 80) |
 | Routing | react-router-dom 6.x | Basename from `import.meta.env.BASE_URL` |
 | HTTP client | **Hand-rolled `fetch` wrapper** | `frontend/src/api.js` — see below |
 | Styling | Hand-written CSS | `frontend/src/styles.css` (~36 KB). **No Tailwind.** |
@@ -215,8 +211,8 @@ standalone backend instead, set `VITE_API_PROXY_TARGET=http://localhost:8080`.
 | Component | Choice |
 |---|---|
 | Engine | PostgreSQL (local image pinned to `postgres:18-alpine`) |
-| Hosted provider | Neon — four independent endpoints, one per node |
-| Local orchestration | Docker Compose, 4 containers |
+| Hosted provider | Neon — one independent endpoint for the catalog and each of the ten city shards |
+| Local orchestration | Docker Compose — eleven PostgreSQL nodes and an Nginx service |
 | Schema management | Versioned SQL migrations + `schema_migrations` ledger |
 | Type layer | Shared `common` schema of PostgreSQL enums |
 
@@ -228,10 +224,10 @@ The cache is real but off unless you configure it, which is worth stating plainl
 |---|---|
 | Redis | **Optional.** `ioredis` is a dependency and `REDIS_URL` is read at boot. With no URL the process uses a bounded in-memory LRU. The API is fully correct either way. |
 | Bloom filters | **Implemented, opt-out.** Rebuilt from the tables at boot. An untrusted filter is never consulted, so an unbuilt filter is the pre-optimisation behaviour, not a wrong answer. Disable with `BLOOM_ENABLED=false`. |
-| Nginx | **Used.** `nginx/nginx.conf` reverse proxy + load balancer (`least_conn`) to backend instances on `:8080`/`:8081`/`:8082`. `gateway/gateway.js` bypassed when using nginx. |
+| Nginx | **Supported.** `nginx/nginx.conf` reverse proxy + load balancer (`least_conn`) to backend workers on `:4001`–`:4003`. Use `pnpm start:nginx` and `pnpm start:workers`; the Nginx install path can be set with `NGINX_HOME`. |
 | Tailwind CSS | **Not used.** Styling is a single hand-written stylesheet. |
 | NestJS | **Not used.** The backend is plain Express. |
-| Dockerised app tier | **PostgreSQL only.** `docker-compose.yml` starts the 4 database nodes; the backend runs on the host (`pnpm start`). |
+| Dockerised app tier | `docker-compose.yml` starts PostgreSQL nodes and Nginx; the backend workers run on the host with `pnpm start:workers`. |
 
 See [section 9.2](#92-caching-and-presence-indexes) for what is cached and, more
 importantly, what is deliberately never cached.
@@ -254,7 +250,7 @@ dbbemn-blood-bank-network/
 │   │   ├── components/           # AppShell, UI primitives
 │   │   ├── hooks/useRequest.js   # shared async-load hook
 │   │   └── pages/                # Auth, Bank, Donor, Hospital, Request, System
-│   └── vite.config.js            # dev proxy /api/v1 → :8080
+│   └── vite.config.js            # dev proxy /api/v1 → configurable local API origin
 │
 ├── backend/                      # Express API (ESM JavaScript)
 │   ├── src/
@@ -286,7 +282,7 @@ dbbemn-blood-bank-network/
 │   ├── migrate.js                # fan-out migration runner + drift detection
 │   ├── seed.js / seed-large.js   # deterministic demo seed (small / 5k+50k per city)
 │   ├── bootstrap-admin.js        # ★ creates the first SYSTEM_ADMIN
-│   ├── distribute-data.js        # legacy-DB → 4-node copy, plan/apply/verify
+│   ├── distribute-data.js        # legacy single DB → catalog + city shards
 │   ├── verify-invariants.js      # per-city invariant checks (I1, I2, …)
 │   ├── verify-phase1.js          # table ownership + row-count report
 │   ├── test-all.js  run-test.js  run-db-command.js
@@ -735,7 +731,7 @@ correctness-only check while being badly broken.
 
 - Node.js 20+ (uses `node --env-file-if-exists`)
 - pnpm 9+ (npm/yarn are blocked by a `preinstall` guard)
-- Docker Desktop — *or* four reachable PostgreSQL endpoints
+- Docker Desktop for the local distributed topology, or reachable PostgreSQL endpoints
 - Optional: a Neon account for a hosted topology
 
 ### 10.2 Environment variables
@@ -753,7 +749,7 @@ cp .env.example .env
 | `DB_MODE` | inferred | `single` or `distributed`. If unset, presence of any `*_DATABASE_URL` implies distributed. |
 | `DATABASE_URL` | — | Required in `single` mode. |
 | `CATALOG_DATABASE_URL` | `DATABASE_URL` | Catalog node — **where `catalog.users` lives**. |
-| `<CITY>_DATABASE_URL` | `DATABASE_URL` | One per entry in `CITY_CODES` (see `backend/src/db/shard-router.js`), e.g. `KHI_DATABASE_URL` (Karachi), `LHE_DATABASE_URL` (Lahore), `ISB_DATABASE_URL` (Islamabad). |
+| `<CITY>_DATABASE_URL` | `DATABASE_URL` | One per entry in `CITY_CODES` (see `backend/src/db/shard-router.js`), e.g. `HYD_DATABASE_URL` (Hyderabad). |
 
 > In `distributed` mode every `CATALOG_`/`<CITY>_DATABASE_URL` for the codes in
 > `CITY_CODES` is mandatory; the script and app pool registries both throw if any is
@@ -766,7 +762,7 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PORT` | `8080` | HTTP port (validated 1–65535). |
+| `PORT` | `8080` | HTTP port (validated 1–65535); worker and gateway launchers assign their own ports. |
 | `INSTANCE_ID` | random UUID | Echoed in the `X-Instance-Id` response header. |
 | `CORS_ORIGINS` | — | Comma-separated **allowlist**. Anything else gets `403`. |
 | `FRONTEND_DIST` | `../frontend/dist` | Built SPA to serve for single-origin hosting. |
@@ -801,7 +797,14 @@ API instance), `CACHE_KEY_PREFIX` (`dbbemn`), `CACHE_ENABLED` (`true`),
 `BLOOM_ERROR_RATE` (`0.001`). Sizing affects only the false-positive rate, never
 correctness — an undersized filter costs queries, not answers.
 
-**Gateway** (only when `ENABLE_GATEWAY` is set)
+**Worker launcher** (`pnpm start:workers`)
+
+`WORKER_COUNT` (3), `WORKER_BASE_PORT` (4001), and `LOG_DIR` (repository root).
+The launcher writes `worker<port>.log` files to `LOG_DIR`, checks that its ports are
+available before starting, and runs maintenance jobs only on worker 1 by default.
+`BACKGROUND_JOBS_ENABLED=false` disables those jobs.
+
+**Node gateway** (when started with `ENABLE_GATEWAY=true`)
 
 `GATEWAY_WORKERS` (3), `GATEWAY_WORKER_BASE_PORT` (4001), `GATEWAY_HEALTH_PATH`
 (`/api/v1/health/live`), `GATEWAY_HEALTH_INTERVAL_MS` (2000),
@@ -821,27 +824,39 @@ public bundle at build time; never put a secret in one.
 # 1. install
 pnpm install
 
-# 2. start the PostgreSQL nodes (default topology: 1 catalog + 10 city shards)
-docker compose up -d
-#    published on 5436 (catalog) and one port per city shard
+# 2. Choose a database mode and configure .env.
+#    For the local distributed topology, set DB_MODE=distributed and configure
+#    CATALOG_DATABASE_URL plus every <CITY>_DATABASE_URL from .env.example.
 
-# 3. apply migrations (idempotent, fans out to each node)
+# 3. For distributed mode, start the catalog and ten city PostgreSQL nodes.
+#    Start database services explicitly so the host-installed Nginx can use :80.
+docker compose up -d db-catalog db-khi db-lhe db-isb db-rwp db-fsd db-mul db-pew db-que db-hyd db-guj
+
+# 4. Apply migrations (idempotent; distributed mode migrates every node).
 pnpm migrate
 
-# 4. optional demo data
-pnpm seed:small     # deterministic: 2 donors, 2 units for the original cities
-pnpm seed           # large: 5,000 donors + 50,000 units per city (all CITY_CODES)
-
-# 5. create the first system administrator (interactive)
+# 5. Optional demo data, then create the first administrator.
+pnpm seed:small
 pnpm bootstrap:admin
 
-# 6. run
-pnpm dev            # API with --watch on :8080
-cd frontend && pnpm dev   # Vite on :5173, proxying /api/v1 → local gateway :80
+# 6. Run a single backend with hot reload (PORT, default 8080).
+pnpm dev
+#    Or, for the Nginx load-balanced setup, use separate terminals:
+pnpm start:workers
+pnpm start:nginx
+
+# 7. In another terminal, start the frontend (Vite on :5173).
+cd frontend
+pnpm dev
 ```
 
+The frontend dev proxy defaults to Nginx at `http://127.0.0.1:80`. When running a
+single backend with `pnpm dev` instead, set `VITE_API_PROXY_TARGET=http://127.0.0.1:8080`
+in the frontend environment.
+
 `pnpm seed` and `pnpm seed:small` are **demo data only** and are not required to run
-the application. Rows they create are tagged so they can be identified and removed:
+the application. The small seed covers the original KHI/LHE/ISB demo dataset; the large
+seed creates 5,000 donors and 50,000 units per city across `CITY_CODES`. Rows they create are tagged so they can be identified and removed:
 IDs prefixed `10000000-`/`11000000-` (banks), `20000000-`/`21000000-` (hospitals),
 `30000000-`/`50000000-` (donors/units), donor names `SIMULATED large seed donor …`, and
 donation notes `SIMULATED large seed` / `Development demo seed`.
@@ -851,6 +866,9 @@ donation notes `SIMULATED large seed` / `Development demo seed`.
 | Command | Effect |
 |---|---|
 | `pnpm migrate` | Apply migrations to every node, with drift detection. |
+| `pnpm start:workers` | Start backend workers on ports 4001–4003 for Nginx. |
+| `pnpm start:nginx` | Validate the repository Nginx config and start Nginx. |
+| `pnpm start` | Start the API, or the Node gateway when `ENABLE_GATEWAY=true`. |
 | `pnpm bootstrap:admin` | Create the **first** `SYSTEM_ADMIN`. Refuses if one exists. |
 | `pnpm cache:rebuild` | Rebuild presence filters from the tables. `-- --city=KHI` for one node. |
 | `pnpm test:cache` | Cache and presence-index invariants. No database needed. |
@@ -859,7 +877,7 @@ donation notes `SIMULATED large seed` / `Development demo seed`.
 | `pnpm test` | Full pipeline: reset test schemas → migrate → seed → verify → phase tests. |
 | `pnpm loadtest:mixed` | Mixed read/write workload against a running API. |
 | `pnpm loadtest:contention` | Deliberate reservation contention — the double-booking test. |
-| `pnpm data:distribute` | Copy a legacy single DB into the 4-node topology. |
+| `pnpm data:distribute` | Copy a legacy single DB into the catalog + city-shard topology. |
 | `pnpm reset-test-schemas` | Drop prefixed test schemas. Refuses on an empty prefix. |
 
 > `bootstrap:admin` requires an interactive TTY (it disables echo for the password) and
@@ -880,7 +898,8 @@ donation notes `SIMULATED large seed` / `Development demo seed`.
 | Health check path | `/api/v1/health/live` |
 
 Required environment variables on Render: `JWT_SECRET`, `JWT_REFRESH_SECRET`,
-`CORS_ORIGINS`, `DB_MODE=distributed`, and all four `*_DATABASE_URL` values.
+`CORS_ORIGINS`, `DB_MODE=distributed`, `CATALOG_DATABASE_URL`, and every city
+`<CITY>_DATABASE_URL` in `CITY_CODES`.
 
 > **`CORS_ORIGINS` is not optional.** `backend/src/app.js` enforces an allowlist and
 > returns `403 CORS_ORIGIN_DENIED` to any origin not listed. Set it to your Vercel
@@ -911,8 +930,9 @@ because requests are same-origin. Choose one or the other, not both.
 
 ### 11.4 Database
 
-Neon provisions one PostgreSQL endpoint per node. Apply migrations once (from a machine
-that can reach all four) with `pnpm migrate`; the app does not migrate at boot.
+Neon provisions one PostgreSQL endpoint for the catalog and one for each city shard.
+Apply migrations once (from a machine that can reach all eleven nodes) with
+`pnpm migrate`; the app does not migrate at boot.
 
 ---
 

@@ -88,8 +88,10 @@ const STATS_REFRESH_LOCK_TTL_SECONDS = 300;
 const cityInflight = new Map();
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-function cityCacheKey(cityCode, bankId) {
-  return `stats:city:v3:${cityCode}:${bankId ?? "all"}`;
+async function cityCacheKey(cityCode, bankId) {
+  if (!bankId) return `stats:city:v4:${cityCode}:all`;
+  const versions = await inventoryVersions([cityCode]);
+  return `stats:city:v4:${cityCode}:${bankId}:${versionToken(versions, [cityCode])}`;
 }
 
 const INVENTORY_GROUPS = ["A", "B", "AB", "O"];
@@ -180,6 +182,7 @@ async function estimateCityStats(cityCode) {
             s.most_common_freqs::text::real[] AS frequencies,
             s.histogram_bounds::text::text[] AS histogram,
             CURRENT_DATE::text AS today,
+            (CURRENT_DATE - 1)::text AS "expiryStart",
             (CURRENT_DATE + 7)::text AS "expiryCutoff",
             (now() - interval '30 days')::text AS "activityCutoff",
             now()::text AS "now"
@@ -266,6 +269,7 @@ async function estimateCityStats(cityCode) {
   const donationDateStats = statByColumn(rows, "donations", "collected_at");
   const transfusionDateStats = statByColumn(rows, "transfusions", "transfused_at");
   const expiryFraction = estimatedFrequencyThrough(dateStats, units.expiryCutoff);
+  const beforeExpiryFraction = estimatedFrequencyThrough(dateStats, units.expiryStart);
   const expiredFraction = estimatedFrequencyThrough(dateStats, units.today);
   const eligibleStatusFrequency = ["AVAILABLE", "QUARANTINE", "RESERVED"]
     .reduce((sum, status) => sum + statuses.get(status), 0);
@@ -295,7 +299,9 @@ async function estimateCityStats(cityCode) {
       : 0,
     inventoryDegraded: false,
     expiry: {
-      expiring7d: Math.round(rowEstimate * eligibleStatusFrequency * (expiryFraction ?? 0)),
+      expiring7d: Math.round(
+        rowEstimate * eligibleStatusFrequency * Math.max(0, (expiryFraction ?? 0) - (beforeExpiryFraction ?? 0)),
+      ),
       expired: Math.round(rowEstimate * (expiredFraction ?? 0)),
       available: Math.round(rowEstimate * statuses.get("AVAILABLE")),
       reserved: Math.round(rowEstimate * statuses.get("RESERVED")),
@@ -399,7 +405,8 @@ async function computeCityStats(cityCode, bankId) {
                 component_type::text AS "componentType", status::text AS status,
                 count(*)::int AS count,
                 count(*) FILTER (
-                  WHERE expiry_date <= CURRENT_DATE + 7
+                  WHERE expiry_date >= CURRENT_DATE
+                    AND expiry_date <= CURRENT_DATE + 7
                     AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED')
                 )::int AS "expiring7d",
                 count(*) FILTER (WHERE expiry_date <= CURRENT_DATE)::int AS expired
@@ -431,7 +438,8 @@ async function computeCityStats(cityCode, bankId) {
                 count(*) FILTER (WHERE status = 'EXPIRED')::int AS expired,
                 count(*) FILTER (WHERE status = 'DISCARDED')::int AS discarded,
                 count(*) FILTER (
-                  WHERE expiry_date <= CURRENT_DATE + 7
+                  WHERE expiry_date >= CURRENT_DATE
+                    AND expiry_date <= CURRENT_DATE + 7
                     AND status IN ('AVAILABLE', 'QUARANTINE', 'RESERVED')
                 )::int AS "expiring7d",
                 count(*) FILTER (WHERE expiry_date <= CURRENT_DATE)::int AS "expiredByDate"
@@ -517,7 +525,7 @@ async function computeCityStats(cityCode, bankId) {
 }
 
 async function refreshCityStats(cityCode, bankId) {
-  const key = cityCacheKey(cityCode, bankId);
+  const key = await cityCacheKey(cityCode, bankId);
   const existing = cityInflight.get(key);
   if (existing) return existing;
   const promise = (async () => {
@@ -569,7 +577,24 @@ async function refreshCityStats(cityCode, bankId) {
 }
 
 async function loadCityStats(cityCode, bankId) {
-  const raw = await cacheGet(cityCacheKey(cityCode, bankId));
+  const rawCurrent = await cacheGet(await cityCacheKey(cityCode, bankId));
+  if (!rawCurrent && bankId) {
+    const rawLegacy = await cacheGet(`stats:city:v3:${cityCode}:${bankId}`);
+    if (rawLegacy) {
+      try {
+        const legacy = JSON.parse(rawLegacy);
+        if (legacy?.savedAt && Array.isArray(legacy.matrixRows) && Array.isArray(legacy.reservationRows)) {
+          refreshCityStats(cityCode, bankId).catch((error) => {
+            log.warn({ err: error.message, cityCode }, "stats refresh failed; serving previous bank summary");
+          });
+          return legacy;
+        }
+      } catch {
+        log.warn({ cityCode }, "ignoring invalid legacy bank stats cache");
+      }
+    }
+  }
+  const raw = rawCurrent;
   let cached = null;
   if (raw) {
     try {

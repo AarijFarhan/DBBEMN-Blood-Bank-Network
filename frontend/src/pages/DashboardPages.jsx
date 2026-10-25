@@ -181,11 +181,11 @@ function DashboardBody({ overview, timeseries, feed, showUserCount = false }) {
         {showUserCount ? <StatCard label="Blood banks" value={formatNumber(totals.bloodBankCount)} detail="Active blood-bank records" tone="red" icon="server" /> : null}
       </div>
 
-      {estimatesInUse ? (
+      {/* {estimatesInUse ? (
         <Notice tone="warning" title="Estimated analytics">
           Cold system-wide results use PostgreSQL planner statistics for fast loading. Counts and trends are approximate and are for dashboard analytics only, not operational or clinical decisions.
         </Notice>
-      ) : null}
+      ) : null} */}
       {overview?.partial ? (
         <PartialResults meta={{ partial: true, unavailableCities: overview.unavailableCities }} />
       ) : null}

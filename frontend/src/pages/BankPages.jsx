@@ -46,6 +46,7 @@ export function BankInventoryPage() {
   const [reason, setReason] = useState("");
   const [action, setAction] = useState({ loading: false, error: null, success: null });
   const { errors, setErrors, clearError, clearAll } = useFieldErrors();
+  const summary = useRequest(() => api.stats.overview(), []);
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
     return () => window.clearTimeout(timeout);
@@ -61,9 +62,10 @@ export function BankInventoryPage() {
     [status, debouncedQuery, page, user?.bloodBankId],
   );
   const units = useMemo(() => listFrom(request.data, ["units", "items"]).map(normalizeResult), [request.data]);
-  const available = units.filter((unit) => unit.status === "AVAILABLE").length;
-  const quarantine = units.filter((unit) => unit.status === "QUARANTINE").length;
-  const expiring = units.filter((unit) => unit.expiryDate && new Date(unit.expiryDate).getTime() - Date.now() < 7 * 86400000).length;
+  const summaryUnavailable = Boolean(summary.error || summary.data?.partial);
+  const inventoryMetric = (value) =>
+    summary.loading ? "…" : summaryUnavailable ? "—" : formatNumber(value);
+  const inventoryTotals = summary.data?.totals;
 
   function openDiscard(unit) {
     setSelected(unit);
@@ -83,6 +85,7 @@ export function BankInventoryPage() {
       setAction({ loading: false, error: null, success: "Unit moved to discarded status." });
       setSelected(null);
       request.reload();
+      summary.reload();
     } catch (error) {
       setAction({ loading: false, error, success: null });
     }
@@ -90,9 +93,11 @@ export function BankInventoryPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Blood bank workspace" title="Inventory control" description="See the live unit ledger for your bank, with expiry and quarantine signals first." actions={<Button variant="secondary" onClick={request.reload}>Refresh inventory</Button>} />
+      <PageHeader eyebrow="Blood bank workspace" title="Inventory control" description="See the live unit ledger for your bank, with expiry and quarantine signals first." actions={<Button variant="secondary" onClick={() => { request.reload(); summary.reload(); }}>Refresh inventory</Button>} />
       {action.success ? <Notice tone="success" title="Inventory updated">{action.success}</Notice> : null}
-      <div className="stat-grid"><div className="stat-card stat-card-blue"><span>Available on page</span><strong>{available}</strong><small>Ready to reserve</small></div><div className="stat-card stat-card-amber"><span>Quarantine on page</span><strong>{quarantine}</strong><small>Awaiting screening</small></div><div className="stat-card stat-card-red"><span>Expiring on page</span><strong>{expiring}</strong><small>Within seven days</small></div></div>
+      {summary.error ? <ErrorState error={summary.error} onRetry={summary.reload} /> : null}
+      {summary.data?.partial ? <Notice tone="warning" title="Inventory summary incomplete">Bank-wide counts are hidden because the city shard did not respond.</Notice> : null}
+      <div className="stat-grid"><div className="stat-card stat-card-blue"><span>Available units</span><strong>{inventoryMetric(inventoryTotals?.unitsByStatus?.AVAILABLE)}</strong><small>Ready to reserve · entire bank</small></div><div className="stat-card stat-card-amber"><span>Quarantine units</span><strong>{inventoryMetric(inventoryTotals?.unitsByStatus?.QUARANTINE)}</strong><small>Awaiting screening · entire bank</small></div><div className="stat-card stat-card-red"><span>Expiring in 7 days</span><strong>{inventoryMetric(inventoryTotals?.expiring7d)}</strong><small>Eligible units · entire bank</small></div></div>
       <SectionCard title="Unit ledger" description="Search and page through your tenant-scoped inventory."><UnitFilters status={status} setStatus={setStatus} query={query} setQuery={setQuery} resetPage={() => setPage(1)} />{request.loading ? <LoadingState label="Loading unit inventory" /> : null}{request.error ? <ErrorState error={request.error} onRetry={request.reload} /> : null}{!request.loading && !request.error ? <><UnitTable units={units} onDiscard={openDiscard} /><div className="pagination-controls"><Button variant="secondary" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1 || request.loading}>Previous</Button><span>Page {page}</span><Button variant="secondary" onClick={() => setPage((current) => current + 1)} disabled={!request.data?.hasMore || request.loading}>Next</Button></div></> : null}</SectionCard>
       <Modal open={Boolean(selected)} title="Discard unit" onClose={() => setSelected(null)} footer={<><Button variant="ghost" onClick={() => setSelected(null)}>Keep unit</Button><Button variant="danger" onClick={discard} disabled={action.loading}>{action.loading ? "Discarding…" : "Discard unit"}</Button></>}>
         {action.error ? <Notice tone="error" title="Discard failed">{friendlyError(action.error)}{errorDetails(action.error) ? ` ${errorDetails(action.error)}` : ""}</Notice> : null}

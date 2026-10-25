@@ -158,6 +158,7 @@ router.post(
     // they are indexed together.
     await rememberCreated(KIND.DONATION, cityCode, donationId);
     await rememberCreated(KIND.UNIT, cityCode, created.units.map((unit) => unit.unitId));
+    await invalidateCityInventory(cityCode);
     publish(EVENT_TYPES.DONATION_CREATED, {
       cityCode,
       donationId,
