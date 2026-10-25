@@ -16,11 +16,11 @@ import {
  * runtime concern and live here.
  *
  * In `single` mode there is exactly one PostgreSQL instance holding catalog,
- * common and all three city schemas, so every lookup returns that one pool.
+ * common and all city schemas, so every lookup returns that one pool.
  * In `distributed` mode each city is its own instance and catalog is separate.
  */
 
-// In single mode every schema lives in one instance, so all three city lookups
+// In single mode every schema lives in one instance, so all city lookups
 // and the catalog lookup must resolve to the SAME pool. Creating one pool per
 // city would triple the connection count against a single database for no
 // isolation benefit, since there is only one server to isolate from.
@@ -34,6 +34,17 @@ const cityPools = Object.freeze(
     CITY_CODES.map((cityCode) => [
       cityCode,
       singlePool ?? createPool(env.cityDatabaseUrls[cityCode], { label: cityCode, max: env.db.poolMaxCity }),
+    ]),
+  ),
+);
+
+const cityReplicaPools = Object.freeze(
+  Object.fromEntries(
+    CITY_CODES.map((cityCode) => [
+      cityCode,
+      env.cityReplicaDatabaseUrls[cityCode]
+        ? createPool(env.cityReplicaDatabaseUrls[cityCode], { label: `${cityCode}-replica`, max: 1 })
+        : null,
     ]),
   ),
 );
@@ -59,6 +70,14 @@ export function getPoolForCity(cityCode) {
   return pool;
 }
 
+/** Optional physical PostgreSQL standby pool for a city. */
+export function getReplicaPoolForCity(cityCode) {
+  if (!CITY_CODES.includes(cityCode)) {
+    throw new RangeError(`Unsupported city code: ${String(cityCode)}`);
+  }
+  return cityReplicaPools[cityCode];
+}
+
 export const withCityClient = (cityCode) => withClientFor(getPoolForCity(cityCode));
 export const withCitySerializable = (cityCode) =>
   withSerializableRetryFor(getPoolForCity(cityCode));
@@ -69,6 +88,13 @@ export const withCatalogSerializable = withSerializableRetryFor(catalogPool);
 /** All city pools, in CITY_CODES order. */
 export function allCityPools() {
   return CITY_CODES.map((cityCode) => ({ cityCode, pool: cityPools[cityCode] }));
+}
+
+/** Configured physical PostgreSQL standby pools. */
+export function allCityReplicaPools() {
+  return CITY_CODES
+    .map((cityCode) => ({ cityCode, pool: cityReplicaPools[cityCode] }))
+    .filter(({ pool }) => pool !== null);
 }
 
 /**

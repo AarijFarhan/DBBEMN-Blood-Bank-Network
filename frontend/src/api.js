@@ -121,6 +121,7 @@ async function request(path, options = {}) {
     auth = true,
     retry = true,
     headers = {},
+    allowStatuses = [],
   } = options;
   const requestHeaders = { ...headers };
   if (body !== undefined) requestHeaders["Content-Type"] = "application/json";
@@ -131,7 +132,7 @@ async function request(path, options = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const payload = parsePayload(await response.text());
-  if (!response.ok) {
+  if (!response.ok && !allowStatuses.includes(response.status)) {
     if (response.status === 401 && auth && retry && !path.startsWith("/auth/")) {
       try {
         await refreshSession();
@@ -213,7 +214,7 @@ export const api = {
   },
   health: {
     live: () => request("/health/live", { auth: false }),
-    ready: () => request("/health/ready", { auth: false }),
+    ready: () => request("/health/ready", { auth: false, allowStatuses: [503] }),
   },
   stats: {
     overview: () => request("/stats/overview"),
@@ -221,6 +222,7 @@ export const api = {
   },
   system: {
     cluster: () => request("/admin/cluster-status"),
+    chaosStatus: () => request("/admin/chaos"),
     chaos: (city, action, body) => request(`/admin/chaos/${city}/${action}`, { method: "POST", body }),
     listUsers: (params) => request(queryPath("/admin/users", params)),
     createUser: (body) => request("/admin/users", { method: "POST", body }),

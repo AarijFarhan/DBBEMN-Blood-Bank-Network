@@ -750,6 +750,7 @@ cp .env.example .env
 | `DATABASE_URL` | — | Required in `single` mode. |
 | `CATALOG_DATABASE_URL` | `DATABASE_URL` | Catalog node — **where `catalog.users` lives**. |
 | `<CITY>_DATABASE_URL` | `DATABASE_URL` | One per entry in `CITY_CODES` (see `backend/src/db/shard-router.js`), e.g. `HYD_DATABASE_URL` (Hyderabad). |
+| `<CITY>_REPLICA_DATABASE_URL` | unset | Optional physical PostgreSQL standby endpoint for that city. Used by the system cluster page for live recovery-role, WAL receiver, and replay-lag checks. |
 
 > In `distributed` mode every `CATALOG_`/`<CITY>_DATABASE_URL` for the codes in
 > `CITY_CODES` is mandatory; the script and app pool registries both throw if any is
@@ -757,6 +758,14 @@ cp .env.example .env
 > (`KHI, LHE, ISB, RWP, FSD, MUL, PEW, QUE, HYD, GUJ`). Writing
 > `catalog.users` to a city node is the split-brain the whole design prevents — if you
 > cannot find a user in the database, check you are querying `CATALOG_DATABASE_URL`.
+
+For physical replica monitoring, set a `<CITY>_REPLICA_DATABASE_URL` to an actual
+PostgreSQL standby configured to stream from that city's primary. The API checks
+standby role, WAL receiver state, replay lag, uptime, and connection usage;
+it does **not** provision or configure PostgreSQL replication. Without a replica URL,
+the cluster page reports **Not configured** rather than simulating an Up replica.
+These are database-level metrics; host CPU, RAM, and disk usage need a separate host
+metrics agent or provider monitoring.
 
 **Server**
 
@@ -951,9 +960,14 @@ Tests run against **prefixed schemas** (`t_`, `p3_`) so they never touch develop
 data, and `reset-test-schemas.js` refuses to run with an empty prefix.
 
 The fault-injection harness (`catalog.chaos_flags`, `REPLICA_LAG_MS`) lets
-`/chaos` routes force a shard's primary or replica "down" so the circuit breaker,
-timeout, and partial-result paths in §8 can be exercised deterministically rather than
-waiting for a real outage.
+`/chaos` routes simulate a shard's primary or read model as unavailable. These
+application-level test flags do not stop or alter PostgreSQL servers. The health
+readiness endpoint probes the configured catalog and city primaries directly;
+cluster and health pages also show physical replicas only when an explicit
+`<CITY>_REPLICA_DATABASE_URL` is configured and confirms a streaming standby.
+Chaos simulation flags are persisted in `catalog.chaos_flags`; Health, Chaos
+Controls, and Cluster Status read the same shared flags and refresh them every
+2.5 seconds, so updates made on one API worker appear on the other pages/workers.
 
 The frontend has **no automated test suite** — the only automated gate available for a
 frontend change is `pnpm --filter @workspace/frontend build`.
@@ -975,12 +989,15 @@ All routes are mounted under `/api/v1`. Authentication is `Authorization: Bearer
 | `donors` | `GET /donors/:id`, `GET /donors/:id/availability` |
 | `donor-requests` | `GET|POST /donor-requests`, `POST /donor-requests/:id/respond`, `DELETE /donor-requests/:id` |
 | `reservations` | `GET /reservations`, `POST /reservations`, `POST /reservations/:id/cancel`, `/dispatch`, `/transfuse` |
-| `admin` | `GET|POST /admin/users`, `GET|POST|DELETE /admin/hospitals`, `.../blood-banks`, `.../donors`, chaos + cluster routes |
+| `admin` | `GET|POST /admin/users`, `GET|POST|DELETE /admin/hospitals`, `.../blood-banks`, `.../donors`, `GET /admin/chaos`, chaos controls + live cluster routes |
 | `health` | `GET /health/live`, `GET /health/ready` |
 
-`GET /health/live` is the gateway and platform health path. Admin routes require an
-existing `SYSTEM_ADMIN` token — which is why the first administrator must be created
-out-of-band via `pnpm bootstrap:admin`: the admin API cannot bootstrap itself.
+`GET /health/live` reports process liveness. `GET /health/ready` probes the configured
+catalog and city primary PostgreSQL connections and returns HTTP 503 with per-node
+details if any required primary is unavailable. Physical replicas are optional and
+are reported separately. Admin routes require an existing `SYSTEM_ADMIN` token —
+which is why the first administrator must be created out-of-band via
+`pnpm bootstrap:admin`: the admin API cannot bootstrap itself.
 
 ---
 
@@ -1008,7 +1025,9 @@ Stated plainly, because they bound what the system can honestly claim.
 4. **The read model is simulated, not streamed.** It is outbox-driven within a single
    node, not logical/logical streaming replication. Shard schemas are named
    `*_read` and responses are tagged `SIMULATED_REPLICA` to make this explicit rather
-   than let a reader assume real replication.
+   than let a reader assume real replication. Optional physical PostgreSQL standbys
+   can be monitored by the cluster page, but application search still reads this
+   simulated `*_read` model.
 5. **In-process circuit breakers.** Breaker state lives in one Node process. Across
    multiple API instances each keeps its own counters, so breaker state is not shared.
 6. **Saga compensation is best-effort.** A failure *during* compensation leaves partial

@@ -21,11 +21,9 @@ const CONNECTION_RETRY_CODES = new Set([
  * once and behaves exactly as before.
  *
  * Why the default pool size is small: distributed mode creates one pool per
- * node (1 catalog + 10 cities) per backend instance. At the old default of 10
- * that was 110 connections for a single instance - more than PostgreSQL's
- * default max_connections=100 - and up to 330 with three workers behind the
- * proxy. Callers that need a different depth pass it explicitly; see
- * backend/src/db/registry.js.
+ * primary/catalog node (1 catalog + 10 cities) per backend instance. Optional
+ * physical replica pools are limited to one connection each. Callers that need
+ * a different depth pass it explicitly; see backend/src/db/registry.js.
  */
 export function createPool(connectionString, { max = env.db.poolMaxCity, label = "default" } = {}) {
   if (!connectionString) {

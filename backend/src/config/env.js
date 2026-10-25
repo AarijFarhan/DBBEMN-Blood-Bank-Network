@@ -90,6 +90,14 @@ export const env = Object.freeze({
       ]),
     ),
   ),
+  cityReplicaDatabaseUrls: Object.freeze(
+    Object.fromEntries(
+      CITY_CODES.map((cityCode) => [
+        cityCode,
+        process.env[`${cityCode}_REPLICA_DATABASE_URL`] || null,
+      ]),
+    ),
+  ),
   jwtSecret,
   jwtRefreshSecret,
   corsOrigins: (process.env.CORS_ORIGINS ?? "")
@@ -105,12 +113,9 @@ export const env = Object.freeze({
   frontendDist: new URL("../../../frontend/dist/", import.meta.url),
 
   // ── Connection pools ────────────────────────────────────────────────────
-  // Distributed mode opens one pool per node: 1 catalog + 10 cities = 11 pools
-  // per backend instance. The defaults below cap an instance at 33 connections,
-  // which fits inside PostgreSQL's default max_connections=100 even when three
-  // worker instances run behind the proxy (99 total). Raising these is the
-  // first knob to turn if a node is the bottleneck, but the ceiling is
-  // max_connections on the server, not the pool size here.
+  // Distributed mode opens 11 primary/catalog pools per backend instance.
+  // Optional physical replica pools use one connection each; include them when
+  // sizing max_connections for deployments that configure replica URLs.
   db: Object.freeze({
     // Per-city pools. Three leaves room for the two background jobs that
     // overlap on every city pool (the 30s sweep and the 1s replica applier)

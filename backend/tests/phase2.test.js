@@ -103,6 +103,62 @@ after(async () => {
   }
 });
 
+test("live cluster monitoring reports PostgreSQL probe data", async () => {
+  const login = await request("/auth/login", {
+    method: "POST",
+    body: { login: adminEmail, password: testPassword },
+  });
+  assert.equal(login.response.status, 200);
+
+  const cluster = await request("/admin/cluster-status", { token: login.data.accessToken });
+  assert.equal(cluster.response.status, 200);
+  assert.deepEqual(Object.keys(cluster.data.cities).sort(), [...CITY_CODES].sort());
+  assert.equal(cluster.data.cities.KHI.primary.status, "up", JSON.stringify(cluster.data.cities.KHI.primary));
+  assert.equal(cluster.data.cities.KHI.primary.role, "primary");
+  assert.equal(cluster.data.cities.KHI.primary.configured, true);
+  assert.equal(typeof cluster.data.cities.KHI.primary.connections, "number");
+  assert.equal(cluster.data.cities.KHI.inventory_approximate, true);
+  assert.equal(cluster.data.cities.KHI.replica.configured, Boolean(process.env.KHI_REPLICA_DATABASE_URL));
+  if (!process.env.KHI_REPLICA_DATABASE_URL) {
+    assert.equal(cluster.data.cities.KHI.replica.status, "not_configured");
+  }
+  assert.equal("simulation" in cluster.data.cities.KHI, false);
+
+  const readiness = await request("/health/ready");
+  assert.equal(readiness.response.status, 200);
+  assert.equal(readiness.data.status, "ready");
+  assert.equal(readiness.data.catalog.status, "up");
+  assert.equal(readiness.data.catalog.role, "primary");
+  assert.equal(readiness.data.cities.KHI.primary.status, "up");
+  assert.equal(readiness.data.cities.KHI.primary.role, "primary");
+  assert.equal(readiness.data.cities.KHI.replica.configured, Boolean(process.env.KHI_REPLICA_DATABASE_URL));
+
+  const chaos = await request("/admin/chaos", { token: login.data.accessToken });
+  assert.equal(chaos.response.status, 200);
+  assert.equal(chaos.data.simulation, "SIMULATED");
+  assert.equal(typeof chaos.data.flags.KHI.primary_down, "boolean");
+  const originalLag = chaos.data.flags.KHI.extra_lag_ms;
+  try {
+    const update = await request("/admin/chaos/KHI/lag", {
+      method: "POST",
+      token: login.data.accessToken,
+      body: { ms: 4321 },
+    });
+    assert.equal(update.response.status, 200);
+
+    const refreshedChaos = await request("/admin/chaos", { token: login.data.accessToken });
+    assert.equal(refreshedChaos.response.status, 200);
+    assert.equal(refreshedChaos.data.flags.KHI.extra_lag_ms, 4321);
+  } finally {
+    const restore = await request("/admin/chaos/KHI/lag", {
+      method: "POST",
+      token: login.data.accessToken,
+      body: { ms: originalLag },
+    });
+    assert.equal(restore.response.status, 200);
+  }
+});
+
 test("Phase 2: auth, catalog, tenant scope, donors, donations, units, and health", async () => {
   const health = await request("/health/ready");
   assert.equal(health.response.status, 200);

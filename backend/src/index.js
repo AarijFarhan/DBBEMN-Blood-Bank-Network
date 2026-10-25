@@ -1,7 +1,7 @@
 import { env } from "./config/env.js";
 import app from "./app.js";
 import { logger } from "./lib/logger.js";
-import { allCityPools, describeTopology, getCatalogPool, waitForDatabases } from "./db/registry.js";
+import { allCityPools, allCityReplicaPools, describeTopology, getCatalogPool, waitForDatabases } from "./db/registry.js";
 import { startBackgroundJobs } from "./jobs/maintenance.js";
 import { closeCache, initCache } from "./cache/store.js";
 import { closeShared, initShared } from "./cache/shared.js";
@@ -64,7 +64,11 @@ async function shutdown(signal) {
   server.close(async () => {
     // Drain every node, not just one: in distributed mode a pool left open
     // would keep its container's connections alive after the API is gone.
-    const closers = [getCatalogPool(), ...allCityPools().map((entry) => entry.pool)];
+    const closers = [
+      getCatalogPool(),
+      ...allCityPools().map((entry) => entry.pool),
+      ...allCityReplicaPools().map((entry) => entry.pool),
+    ];
     await Promise.allSettled([...new Set(closers)].map((pool) => pool.end()));
     await closeCache();
     await closeShared();
